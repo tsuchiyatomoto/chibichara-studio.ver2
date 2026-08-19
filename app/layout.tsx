@@ -4,6 +4,9 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Chibi Character Studio",
   description: "Generate chibi character images with Vertex AI.",
+  icons: {
+    icon: [{ url: "/favicon.png", type: "image/png" }],
+  },
 };
 
 export default function RootLayout({

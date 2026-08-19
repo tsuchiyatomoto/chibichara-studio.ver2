@@ -1,15 +1,24 @@
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { statSync } from "node:fs";
+import OpenAI, { APIConnectionTimeoutError, toFile } from "openai";
 
 export const runtime = "nodejs";
 
-const MODEL_ID = process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image";
+const VERTEX_MODEL_ID =
+  process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image";
+const OPENAI_MODEL_ID = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-2";
 const LOCATION = process.env.GOOGLE_CLOUD_LOCATION ?? "global";
+const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_PROMPT_LENGTH = 2000;
+const MAX_REFERENCE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 type RequestBody = {
   prompt?: unknown;
+  referenceImage?: unknown;
+  provider?: unknown;
 };
+
+type ImageProvider = "vertex" | "openai";
 
 type InlineImage = {
   data: string;
@@ -17,7 +26,6 @@ type InlineImage = {
 };
 
 type ResponsePart = {
-  text?: string;
   inlineData?: {
     data?: string;
     mimeType?: string;
@@ -67,14 +75,31 @@ function getCredentialFileError() {
   }
 }
 
-function collectText(response: GenerateContentLike) {
-  return (
-    response.candidates
-      ?.flatMap((candidate) => candidate.content?.parts ?? [])
-      .map((part) => part.text?.trim())
-      .filter((text): text is string => Boolean(text))
-      .join("\n") ?? ""
+function parseReferenceImage(value: unknown): InlineImage | undefined {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error("referenceImage must be a base64 image data URL.");
+  }
+
+  const match = value.match(
+    /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\r\n]+)$/,
   );
+
+  if (!match) {
+    throw new Error("referenceImage must be a PNG, JPEG, or WebP data URL.");
+  }
+
+  const [, mimeType, data] = match;
+  const byteLength = Buffer.from(data, "base64").byteLength;
+
+  if (byteLength === 0 || byteLength > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new Error("referenceImage must be between 1 byte and 5 MB.");
+  }
+
+  return { data, mimeType };
 }
 
 function findFirstImage(response: GenerateContentLike): InlineImage | undefined {
@@ -114,6 +139,97 @@ export async function POST(request: Request) {
     );
   }
 
+  let referenceImage: InlineImage | undefined;
+
+  try {
+    referenceImage = parseReferenceImage(body.referenceImage);
+  } catch (error) {
+    return jsonError(getErrorMessage(error), 400);
+  }
+
+  const provider: ImageProvider =
+    process.env.NODE_ENV === "development" && body.provider === "openai"
+      ? "openai"
+      : "vertex";
+
+  if (provider === "openai") {
+    if (!process.env.OPENAI_API_KEY) {
+      return jsonError("Set OPENAI_API_KEY in .env.local.", 500);
+    }
+
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      maxRetries: 0,
+      timeout: OPENAI_TIMEOUT_MS,
+    });
+
+    try {
+      const response = referenceImage
+        ? await openai.images.edit({
+            model: OPENAI_MODEL_ID,
+            image: await toFile(
+              Buffer.from(referenceImage.data, "base64"),
+              referenceImage.mimeType === "image/jpeg"
+                ? "reference.jpg"
+                : `reference.${referenceImage.mimeType.split("/")[1]}`,
+              { type: referenceImage.mimeType },
+            ),
+            prompt,
+            background: "opaque",
+            output_format: "png",
+            quality: "high",
+            size: "1024x1024",
+          })
+        : await openai.images.generate({
+            model: OPENAI_MODEL_ID,
+            prompt,
+            background: "opaque",
+            output_format: "png",
+            quality: "high",
+            size: "1024x1024",
+          });
+      const imageData = response.data?.[0]?.b64_json;
+
+      if (!imageData) {
+        return Response.json(
+          {
+            error: "No image was returned. Try a different prompt.",
+            model: OPENAI_MODEL_ID,
+            provider,
+          },
+          { status: 502 },
+        );
+      }
+
+      return Response.json({
+        image: `data:image/png;base64,${imageData}`,
+        mimeType: "image/png",
+        model: OPENAI_MODEL_ID,
+        provider,
+      });
+    } catch (error) {
+      console.error("OpenAI image generation failed:", error);
+
+      if (error instanceof APIConnectionTimeoutError) {
+        return jsonError(
+          "GPT Image 2 generation timed out. Please try again.",
+          504,
+          process.env.NODE_ENV === "development"
+            ? `The request exceeded ${OPENAI_TIMEOUT_MS / 1000} seconds.`
+            : undefined,
+        );
+      }
+
+      return jsonError(
+        "OpenAI image generation failed. Check server logs and OPENAI_API_KEY.",
+        500,
+        process.env.NODE_ENV === "development"
+          ? getErrorMessage(error)
+          : undefined,
+      );
+    }
+  }
+
   if (!process.env.GOOGLE_CLOUD_PROJECT) {
     return jsonError(
       "Set GOOGLE_CLOUD_PROJECT in .env.local or the runtime environment.",
@@ -138,14 +254,30 @@ export async function POST(request: Request) {
 
   try {
     const response = await ai.models.generateContent({
-      model: MODEL_ID,
-      contents: prompt,
+      model: VERTEX_MODEL_ID,
+      contents: referenceImage
+        ? [
+            {
+              role: "user",
+              parts: [
+                { inlineData: referenceImage },
+                { text: prompt },
+              ],
+            },
+          ]
+        : prompt,
       config: {
-        responseModalities: [Modality.TEXT, Modality.IMAGE],
+        responseModalities: [Modality.IMAGE],
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.HIGH,
+        },
+        imageConfig: {
+          aspectRatio: "1:1",
+          imageSize: "512",
+        },
       },
     });
 
-    const responseText = collectText(response);
     const image = findFirstImage(response);
 
     if (!image) {
@@ -154,8 +286,8 @@ export async function POST(request: Request) {
           error:
             response.promptFeedback?.blockReasonMessage ??
             "No image was returned. Try a different prompt.",
-          text: responseText,
-          model: MODEL_ID,
+          model: VERTEX_MODEL_ID,
+          provider,
         },
         { status: 502 },
       );
@@ -164,8 +296,8 @@ export async function POST(request: Request) {
     return Response.json({
       image: `data:${image.mimeType};base64,${image.data}`,
       mimeType: image.mimeType,
-      text: responseText,
-      model: MODEL_ID,
+      model: VERTEX_MODEL_ID,
+      provider,
     });
   } catch (error) {
     console.error("Vertex AI image generation failed:", error);
