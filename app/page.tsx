@@ -29,16 +29,18 @@ const AVATAR_FRAME_LABELS = [
   "目閉じ・口開き",
 ] as const;
 
-const AVATAR_VARIANT_PROMPTS = [
-  "Change only the mouth from fully closed to a small, natural open speaking mouth. Keep both eyes fully open.",
-  "Change only both eyes from open to naturally closed as in a blink. Keep the mouth fully closed.",
-  "Change only both eyes to naturally closed as in a blink and the mouth to a small, natural open speaking mouth.",
-] as const;
+const OPEN_MOUTH_FRAME_PROMPT =
+  "Change only the mouth from fully closed to a small, natural open speaking mouth. Preserve both eyes exactly as they appear in the reference image.";
+const CLOSE_EYES_FRAME_PROMPT =
+  "Change only both eyes from open to naturally closed as in a blink. Preserve the mouth exactly as it appears in the reference image.";
+const COMBINE_CLOSED_EYES_FRAME_PROMPT =
+  "Use the two provided images of the same posed avatar together. Treat the first reference image as the canonical source for the fully closed mouth and lower face. Treat the second reference image as the canonical source for the already-closed eyes and upper face. Create one coherent frame with the first reference's closed mouth and the second reference's closed eyes. Preserve the second reference's exact closed-eye shapes, inner and outer eye corners, eyelid height, spacing, and canvas positions. Preserve the exact character position, scale, pose, head angle, hair, clothing, outline, colors, lighting, framing, canvas size, and pure-white background shared by the references.";
 
 async function requestGeneratedImage(
   prompt: string,
   provider: ImageProvider,
   referenceImage?: string,
+  secondaryReferenceImage?: string,
 ) {
   const response = await fetch("/api/generate-image", {
     method: "POST",
@@ -49,6 +51,7 @@ async function requestGeneratedImage(
       prompt,
       ...(IS_DEVELOPMENT ? { provider } : {}),
       ...(referenceImage ? { referenceImage } : {}),
+      ...(secondaryReferenceImage ? { secondaryReferenceImage } : {}),
     }),
   });
   const data = (await response.json()) as GenerateImageResponse;
@@ -241,6 +244,7 @@ const ATTRIBUTE_GROUPS = [
 ] as const satisfies ReadonlyArray<AttributeGroup>;
 
 type EditorSection = "attributes" | "pose";
+type AttributeInputMode = "guided" | "free";
 type ResultView = "character" | "avatar";
 type PoseGroupId = "basic" | "gesture" | "reaction";
 
@@ -334,6 +338,10 @@ const CUSTOM_PROMPT_PLACEHOLDERS: Record<AttributeId, string> = {
   outfit: "例：白いケープと金色の装飾が付いた冒険者風の衣装",
 };
 
+const GLOBAL_CHARACTER_PROMPT_MAX_LENGTH = 800;
+const GLOBAL_CHARACTER_PROMPT_PLACEHOLDER =
+  "例：小柄な竜人の女の子。薄い褐色肌で、額に短い角があり、頬には星形の模様がある。先端がハート形の尻尾と片耳の大きなピアスが特徴。紺色の軍服風ワンピースに金色の肩章を付けている。";
+
 const INITIAL_CUSTOM_MODES: Record<AttributeId, boolean> = {
   gender: false,
   hairstyle: false,
@@ -355,6 +363,7 @@ const INITIAL_CUSTOM_PROMPTS: Record<AttributeId, string> = {
 export default function Home() {
   const [imageProvider, setImageProvider] =
     useState<ImageProvider>("vertex");
+  const [isProductionUiPreview, setIsProductionUiPreview] = useState(false);
   const [activeEditorSection, setActiveEditorSection] =
     useState<EditorSection>("attributes");
   const [activeAttribute, setActiveAttribute] =
@@ -364,6 +373,9 @@ export default function Home() {
   );
   const [customModes, setCustomModes] = useState(INITIAL_CUSTOM_MODES);
   const [customPrompts, setCustomPrompts] = useState(INITIAL_CUSTOM_PROMPTS);
+  const [attributeInputMode, setAttributeInputMode] =
+    useState<AttributeInputMode>("guided");
+  const [globalCharacterPrompt, setGlobalCharacterPrompt] = useState("");
   const [activePoseGroupId, setActivePoseGroupId] =
     useState<PoseGroupId>("basic");
   const [poseSelections, setPoseSelections] = useState(
@@ -384,10 +396,16 @@ export default function Home() {
   const [avatarFrames, setAvatarFrames] = useState<string[]>([]);
   const [isAvatarMouthOpen, setIsAvatarMouthOpen] = useState(false);
   const [areAvatarEyesClosed, setAreAvatarEyesClosed] = useState(false);
+  const [isAvatarPreviewPlaying, setIsAvatarPreviewPlaying] = useState(true);
+  const [selectedAvatarFrameIndex, setSelectedAvatarFrameIndex] = useState(0);
   const [activeResultView, setActiveResultView] =
     useState<ResultView>("character");
   const [generatingResultView, setGeneratingResultView] =
     useState<ResultView | null>(null);
+  const [generationProgress, setGenerationProgress] = useState(100);
+  const [generationProgressTarget, setGenerationProgressTarget] =
+    useState(100);
+  const [generationProgressRunId, setGenerationProgressRunId] = useState(0);
   const [error, setError] = useState("");
 
   const activeGroup =
@@ -412,11 +430,45 @@ export default function Home() {
   const activeResultLabel =
     activeResultView === "character" ? "キャラクター" : "アバター";
   const isGenerating = generatingResultView !== null;
-  const activeAvatarFrameIndex =
+  const animatedAvatarFrameIndex =
     (areAvatarEyesClosed ? 2 : 0) + (isAvatarMouthOpen ? 1 : 0);
+  const isAvatarFrameInspectionPaused =
+    IS_DEVELOPMENT &&
+    !isProductionUiPreview &&
+    !isAvatarPreviewPlaying;
+  const activeAvatarFrameIndex = isAvatarFrameInspectionPaused
+    ? selectedAvatarFrameIndex
+    : animatedAvatarFrameIndex;
+  const visibleGenerationProgress =
+    generatingResultView === activeResultView ? generationProgress : 100;
 
   useEffect(() => {
-    if (avatarFrames.length !== AVATAR_FRAME_LABELS.length) {
+    if (!isGenerating) {
+      return;
+    }
+
+    const progressTimer = window.setInterval(() => {
+      setGenerationProgress((current) => {
+        if (current >= generationProgressTarget) {
+          return current;
+        }
+
+        const remaining = generationProgressTarget - current;
+        return Math.min(
+          generationProgressTarget,
+          current + Math.max(0.15, remaining * 0.035),
+        );
+      });
+    }, 250);
+
+    return () => window.clearInterval(progressTimer);
+  }, [generationProgressTarget, isGenerating]);
+
+  useEffect(() => {
+    if (
+      avatarFrames.length !== AVATAR_FRAME_LABELS.length ||
+      isAvatarFrameInspectionPaused
+    ) {
       return;
     }
 
@@ -437,7 +489,7 @@ export default function Home() {
       window.clearInterval(blinkTimer);
       window.clearTimeout(blinkResetTimer);
     };
-  }, [avatarFrames.length]);
+  }, [avatarFrames.length, isAvatarFrameInspectionPaused]);
 
   function handleCustomModeToggle(groupId: AttributeId) {
     const nextIsCustom = !customModes[groupId];
@@ -476,7 +528,9 @@ export default function Home() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const target = generationTarget;
-    const selectedImageProvider = imageProvider;
+    const selectedImageProvider = isProductionUiPreview
+      ? "vertex"
+      : imageProvider;
     const baseCharacterImage = results.character?.image;
 
     if (target === "avatar" && !baseCharacterImage) {
@@ -485,8 +539,18 @@ export default function Home() {
       return;
     }
 
+    if (
+      target === "character" &&
+      attributeInputMode === "free" &&
+      !globalCharacterPrompt.trim()
+    ) {
+      setActiveEditorSection("attributes");
+      setError("キャラクター全体の文章を入力してください。");
+      return;
+    }
+
     const emptyCustomGroup =
-      target === "character"
+      target === "character" && attributeInputMode === "guided"
         ? ATTRIBUTE_GROUPS.find(
             (group) =>
               customModes[group.id] && !customPrompts[group.id].trim(),
@@ -515,6 +579,9 @@ export default function Home() {
     }
 
     setError("");
+    setGenerationProgress(0);
+    setGenerationProgressTarget(target === "avatar" ? 20 : 92);
+    setGenerationProgressRunId((current) => current + 1);
     setGeneratingResultView(target);
     setActiveResultView(target);
     setResults((current) => ({
@@ -526,26 +593,35 @@ export default function Home() {
       setAvatarFrames([]);
       setIsAvatarMouthOpen(false);
       setAreAvatarEyesClosed(false);
+      setIsAvatarPreviewPlaying(true);
+      setSelectedAvatarFrameIndex(0);
     }
 
     try {
       if (target === "character") {
-        const selectedAttributes = ATTRIBUTE_GROUPS.flatMap((group) => {
-          if (customModes[group.id]) {
-            return [`${group.label}: ${customPrompts[group.id].trim()}`];
-          }
+        const characterDescription =
+          attributeInputMode === "free"
+            ? `User-specified character design: ${globalCharacterPrompt.trim()}`
+            : `Character attributes: ${ATTRIBUTE_GROUPS.flatMap((group) => {
+                if (customModes[group.id]) {
+                  return [
+                    `${group.label}: ${customPrompts[group.id].trim()}`,
+                  ];
+                }
 
-          const selectedOption = group.options.find(
-            ({ label }) => label === attributeSelections[group.id],
-          );
+                const selectedOption = group.options.find(
+                  ({ label }) => label === attributeSelections[group.id],
+                );
 
-          return selectedOption ? [selectedOption.prompt] : [];
-        });
-        const generationPrompt = `${BASE_PROMPT}\n\nCharacter attributes: ${selectedAttributes.join("; ")}. Make every selected attribute clearly recognizable.\nCreate the canonical base character design in a simple neutral standing pose, with the arms relaxed, both eyes clearly open, the mouth fully closed, and a calm expression.`;
+                return selectedOption ? [selectedOption.prompt] : [];
+              }).join("; ")}`;
+        const generationPrompt = `${BASE_PROMPT}\n\n${characterDescription}. Make every requested visual detail clearly recognizable.\nCreate the canonical base character design in a simple neutral standing pose, with the arms relaxed, both eyes clearly open, the mouth fully closed, and a calm expression. These composition, pose, eye, and mouth requirements override any conflicting details in the user-specified character design.`;
         const data = await requestGeneratedImage(
           generationPrompt,
           selectedImageProvider,
         );
+        setGenerationProgress(100);
+        setGenerationProgressTarget(100);
 
         setAvatarFrames([]);
         setIsAvatarMouthOpen(false);
@@ -568,21 +644,38 @@ export default function Home() {
           selectedImageProvider,
           baseCharacterImage,
         );
+        setGenerationProgress(25);
+        setGenerationProgressTarget(45);
         const frameEditPrefix =
           "Edit the provided posed avatar into one frame-difference image for blinking and lip-sync animation. Preserve the exact canvas coordinates. Do not redraw, move, rescale, crop, rotate, recolor, or otherwise alter the character, pose, head angle, hands, body, hair, clothing, outline, lighting, framing, or pure-white background. ";
-        const variants = await Promise.all(
-          AVATAR_VARIANT_PROMPTS.map((variantPrompt) =>
-            requestGeneratedImage(
-              `${frameEditPrefix}${variantPrompt} Return only the edited square image with no text or guides.`,
-              selectedImageProvider,
-              posedAvatar.image,
-            ),
-          ),
+        const openMouthFrame = await requestGeneratedImage(
+          `${frameEditPrefix}${OPEN_MOUTH_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
+          selectedImageProvider,
+          posedAvatar.image,
         );
+        setGenerationProgress(50);
+        setGenerationProgressTarget(70);
+        const closedEyesOpenMouthFrame = await requestGeneratedImage(
+          `${frameEditPrefix}${CLOSE_EYES_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
+          selectedImageProvider,
+          openMouthFrame.image,
+        );
+        setGenerationProgress(75);
+        setGenerationProgressTarget(92);
+        const closedEyesClosedMouthFrame = await requestGeneratedImage(
+          `${COMBINE_CLOSED_EYES_FRAME_PROMPT} Return only the completed square frame with no text or guides.`,
+          selectedImageProvider,
+          posedAvatar.image,
+          closedEyesOpenMouthFrame.image,
+        );
+        setGenerationProgress(100);
+        setGenerationProgressTarget(100);
 
         setAvatarFrames([
           posedAvatar.image,
-          ...variants.map(({ image }) => image),
+          openMouthFrame.image,
+          closedEyesClosedMouthFrame.image,
+          closedEyesOpenMouthFrame.image,
         ]);
         setResults((current) => ({
           ...current,
@@ -624,13 +717,13 @@ export default function Home() {
             onSubmit={handleSubmit}
             className="overflow-hidden rounded-xl border border-black/10 bg-white shadow-sm"
           >
-            {IS_DEVELOPMENT ? (
+            {IS_DEVELOPMENT && !isProductionUiPreview ? (
               <div className="border-b border-black/10 bg-[#f3ecdc] p-4 sm:px-6">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-2">
                     <span
                       id="image-provider-label"
-                      className="text-sm font-bold text-[#4a2f20]"
+                      className="text-sm font-bold text-[#083344]"
                     >
                       画像モデル
                     </span>
@@ -638,52 +731,68 @@ export default function Home() {
                       開発環境のみ
                     </span>
                   </div>
-                  <div
-                    role="radiogroup"
-                    aria-labelledby="image-provider-label"
-                    className="grid grid-cols-2 gap-1 rounded-lg bg-white/80 p-1"
-                  >
-                    {IMAGE_PROVIDER_OPTIONS.map((provider) => {
-                      const isSelected = imageProvider === provider.id;
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <div
+                      role="radiogroup"
+                      aria-labelledby="image-provider-label"
+                      className="grid grid-cols-2 gap-1 rounded-lg bg-white/80 p-1"
+                    >
+                      {IMAGE_PROVIDER_OPTIONS.map((provider) => {
+                        const isSelected = imageProvider === provider.id;
 
-                      return (
-                        <button
-                          key={provider.id}
-                          type="button"
-                          role="radio"
-                          aria-checked={isSelected}
-                          disabled={isGenerating}
-                          onClick={() => {
-                            setImageProvider(provider.id);
-                            setError("");
-                          }}
-                          className={`rounded-md px-3 py-2 text-xs font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] disabled:cursor-not-allowed disabled:opacity-60 ${
-                            isSelected
-                              ? "bg-[#4a2f20] text-white shadow-sm"
-                              : "text-[#5d5147] hover:bg-[#fff7d6]"
-                          }`}
-                        >
-                          {provider.label}
-                        </button>
-                      );
-                    })}
+                        return (
+                          <button
+                            key={provider.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            disabled={isGenerating}
+                            onClick={() => {
+                              setImageProvider(provider.id);
+                              setError("");
+                            }}
+                            className={`rounded-md px-3 py-2 text-xs font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] disabled:cursor-not-allowed disabled:opacity-60 ${
+                              isSelected
+                                ? "bg-[#22d3ee] text-[#083344] shadow-sm"
+                                : "text-[#35515f] hover:bg-[#e6faff]"
+                            }`}
+                          >
+                            {provider.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isGenerating}
+                      onClick={() => {
+                        setIsProductionUiPreview(true);
+                        setIsAvatarMouthOpen(false);
+                        setAreAvatarEyesClosed(false);
+                        setIsAvatarPreviewPlaying(true);
+                        setError("");
+                      }}
+                      className="rounded-lg border border-[#0891b2] bg-white px-3 py-2 text-xs font-bold text-[#083344] transition hover:bg-[#e6faff] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      本番UIを確認
+                    </button>
                   </div>
                 </div>
               </div>
             ) : null}
             <section className="border-b border-black/10 bg-[#fffdf5] p-5 sm:p-6">
               <div
-                className="mb-6 grid grid-cols-2 gap-1 rounded-xl bg-[#eee4cd] p-1"
+                className="mb-6 grid grid-cols-2 gap-1 rounded-xl border border-[#0891b2]/30 bg-white p-1"
                 aria-label="編集項目"
               >
                 <button
                   type="button"
                   aria-pressed={activeEditorSection === "attributes"}
                   onClick={() => setActiveEditorSection("attributes")}
-                  className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                  className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                     activeEditorSection === "attributes"
-                      ? "bg-[#4a2f20] text-white shadow-sm"
-                      : "text-[#554c43] hover:bg-white/70"
+                      ? "bg-[#22d3ee] text-[#083344] shadow-sm"
+                    : "text-[#083344] hover:bg-[#e6faff]"
                   }`}
                 >
                   <span className="block text-sm font-bold">属性</span>
@@ -692,10 +801,10 @@ export default function Home() {
                   type="button"
                   aria-pressed={activeEditorSection === "pose"}
                   onClick={() => setActiveEditorSection("pose")}
-                  className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                  className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                     activeEditorSection === "pose"
-                      ? "bg-[#4a2f20] text-white shadow-sm"
-                      : "text-[#554c43] hover:bg-white/70"
+                      ? "bg-[#22d3ee] text-[#083344] shadow-sm"
+                    : "text-[#083344] hover:bg-[#e6faff]"
                   }`}
                 >
                   <span className="block text-sm font-bold">ポーズ</span>
@@ -704,18 +813,86 @@ export default function Home() {
 
               {activeEditorSection === "attributes" ? (
                 <>
-              <div className="mb-2">
+              <div className="mb-2 flex items-start justify-between gap-4">
                 <div>
                   <p className="mb-1 text-xs font-bold tracking-[0.18em] text-[#9b6b16] uppercase">
                     Character attributes
                   </p>
                   <h2 className="text-xl font-bold tracking-tight">属性</h2>
                 </div>
+                <button
+                  type="button"
+                  aria-pressed={attributeInputMode === "free"}
+                  aria-controls="global-character-prompt-panel"
+                  aria-label="キャラクター全体を文章で指定"
+                  title="キャラクター全体を文章で指定"
+                  onClick={() => {
+                    setAttributeInputMode((current) =>
+                      current === "guided" ? "free" : "guided",
+                    );
+                    setError("");
+                  }}
+                  className={`flex h-10 shrink-0 items-center gap-2 rounded-lg border px-3 text-sm font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                    attributeInputMode === "free"
+                      ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                      : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
+                  }`}
+                >
+                  <span className="font-serif text-base font-black">T</span>
+                  <span>全体指定</span>
+                </button>
               </div>
               <p className="mb-5 text-sm leading-6 text-[#686052]">
-                カテゴリを切り替えて、キャラクターの特徴を選んでください。
+                {attributeInputMode === "free"
+                  ? "カテゴリに縛られず、キャラクター全体の特徴を文章で指定できます。"
+                  : "カテゴリを切り替えて、キャラクターの特徴を選んでください。"}
               </p>
 
+              {attributeInputMode === "free" ? (
+                <div
+                  id="global-character-prompt-panel"
+                  className="rounded-xl border border-[#d8b146]/70 bg-white p-4 shadow-sm"
+                >
+                  <label
+                    htmlFor="global-character-prompt"
+                    className="mb-3 block text-sm font-bold text-[#083344]"
+                  >
+                    キャラクター全体を文章で指定
+                  </label>
+                  <textarea
+                    id="global-character-prompt"
+                    autoFocus
+                    value={globalCharacterPrompt}
+                    onChange={(event) => {
+                      setGlobalCharacterPrompt(event.target.value);
+                      setError("");
+                    }}
+                    rows={8}
+                    maxLength={GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
+                    placeholder={GLOBAL_CHARACTER_PROMPT_PLACEHOLDER}
+                    aria-describedby="global-character-prompt-help global-character-prompt-fixed"
+                    className="w-full resize-y rounded-lg border border-black/15 bg-[#fffefa] px-3 py-2.5 text-sm leading-6 outline-none transition placeholder:text-[#9a9389] focus:border-[#d4a51c] focus:ring-2 focus:ring-[#ffd84d]/30"
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[#777067]">
+                    <span>この文章だけを属性として使用します</span>
+                    <span>
+                      {globalCharacterPrompt.length}/
+                      {GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
+                    </span>
+                  </div>
+                  <div className="mt-4 space-y-2 rounded-lg bg-[#fff7d6]/70 p-3 text-xs leading-5 text-[#62584d]">
+                    <p id="global-character-prompt-help">
+                      <span className="font-bold text-[#083344]">指定例：</span>
+                      種族、年齢感、体格、肌、顔、耳、角、尻尾、模様、装飾、衣装、素材、雰囲気
+                    </p>
+                    <p id="global-character-prompt-fixed">
+                      <span className="font-bold text-[#083344]">固定：</span>
+                      ちびキャラ・1人・全身・白背景・少し左向き・目開き・口閉じ。ポーズはポーズ画面で指定します。
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
               <div
                 className="grid grid-cols-2 gap-2 sm:grid-cols-3"
                 aria-label="属性カテゴリ"
@@ -735,9 +912,9 @@ export default function Home() {
                       type="button"
                       aria-pressed={isActive}
                       onClick={() => setActiveAttribute(group.id)}
-                      className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                      className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                         isActive
-                          ? "border-[#4a2f20] bg-[#4a2f20] text-white shadow-[0_2px_0_#d4a51c]"
+                          ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-[0_2px_0_#0891b2]"
                           : "border-black/10 bg-white text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
                       }`}
                     >
@@ -746,7 +923,7 @@ export default function Home() {
                       </span>
                       <span
                         className={`mt-0.5 flex min-h-4 items-center text-[11px] ${
-                          isActive ? "text-[#ffe994]" : "text-[#777067]"
+                          isActive ? "text-[#075985]" : "text-[#777067]"
                         }`}
                       >
                         {isCustom ? (
@@ -785,10 +962,10 @@ export default function Home() {
                     aria-label={`${activeGroup.label}を文章で指定`}
                     title="文章で指定"
                     onClick={() => handleCustomModeToggle(activeGroup.id)}
-                    className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                    className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                       customModes[activeGroup.id]
-                        ? "border-[#5a371f] bg-[#ffd84d] text-[#352116] shadow-[0_2px_0_#5a371f]"
-                        : "border-black/15 bg-white text-[#4a2f20] hover:border-[#d8b146] hover:bg-[#fff7d6]"
+                        ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                        : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
                     }`}
                   >
                     T
@@ -798,7 +975,7 @@ export default function Home() {
                   <div className="rounded-lg border border-[#d8b146]/60 bg-[#fffdf5] p-3">
                     <label
                       htmlFor={`custom-prompt-${activeGroup.id}`}
-                      className="mb-2 block text-xs font-bold text-[#5a371f]"
+                      className="mb-2 block text-xs font-bold text-[#087ea4]"
                     >
                       文章で指定
                     </label>
@@ -854,14 +1031,14 @@ export default function Home() {
                           }
                           className={
                             swatch
-                              ? `relative aspect-square rounded-xl border p-1.5 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                              ? `relative aspect-square rounded-xl border p-1.5 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                                   isSelected
-                                    ? "border-[#5a371f] bg-white shadow-[0_0_0_2px_#ffd84d]"
+                                    ? "border-[#0891b2] bg-white shadow-[0_0_0_2px_#ffd84d]"
                                     : "border-black/15 bg-white hover:-translate-y-0.5 hover:border-[#d8b146] hover:shadow-sm"
                                 }`
-                              : `min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                              : `min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                                   isSelected
-                                    ? "border-[#5a371f] bg-[#ffd84d] text-[#352116] shadow-[0_2px_0_#5a371f]"
+                                    ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
                                     : "border-black/10 bg-[#fffefa] text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
                                 }`
                           }
@@ -878,7 +1055,7 @@ export default function Home() {
                               {isSelected ? (
                                 <span
                                   aria-hidden="true"
-                                  className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#4a2f20] text-[11px] font-bold text-white shadow-sm"
+                                  className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#22d3ee] text-[11px] font-bold text-[#083344] shadow-sm"
                                 >
                                   ✓
                                 </span>
@@ -894,6 +1071,8 @@ export default function Home() {
                   </div>
                 )}
               </div>
+                </>
+              )}
                 </>
               ) : (
                 <>
@@ -926,9 +1105,9 @@ export default function Home() {
                           type="button"
                           aria-pressed={isActive}
                           onClick={() => setActivePoseGroupId(group.id)}
-                          className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                          className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                             isActive
-                              ? "border-[#4a2f20] bg-[#4a2f20] text-white shadow-[0_2px_0_#d4a51c]"
+                              ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-[0_2px_0_#0891b2]"
                               : "border-black/10 bg-white text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
                           }`}
                         >
@@ -937,7 +1116,7 @@ export default function Home() {
                           </span>
                           <span
                             className={`mt-0.5 block truncate text-[11px] ${
-                              isActive ? "text-[#ffe994]" : "text-[#777067]"
+                              isActive ? "text-[#075985]" : "text-[#777067]"
                             }`}
                           >
                             {isCustom
@@ -967,10 +1146,10 @@ export default function Home() {
                           }));
                           setError("");
                         }}
-                        className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                        className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                           poseCustomModes[activePoseGroup.id]
-                            ? "border-[#5a371f] bg-[#ffd84d] text-[#352116] shadow-[0_2px_0_#5a371f]"
-                            : "border-black/15 bg-white text-[#4a2f20] hover:border-[#d8b146] hover:bg-[#fff7d6]"
+                            ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                            : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
                         }`}
                       >
                         T
@@ -981,7 +1160,7 @@ export default function Home() {
                       <div className="rounded-lg border border-[#d8b146]/60 bg-[#fffdf5] p-3">
                         <label
                           htmlFor={`custom-pose-${activePoseGroup.id}`}
-                          className="mb-2 block text-xs font-bold text-[#5a371f]"
+                          className="mb-2 block text-xs font-bold text-[#087ea4]"
                         >
                           文章で指定
                         </label>
@@ -1032,9 +1211,9 @@ export default function Home() {
                                   }));
                                   setError("");
                                 }}
-                                className={`min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                                className={`min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                                   isSelected
-                                    ? "border-[#5a371f] bg-[#ffd84d] text-[#352116] shadow-[0_2px_0_#5a371f]"
+                                    ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
                                     : "border-black/10 bg-[#fffefa] text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
                                 }`}
                               >
@@ -1054,7 +1233,7 @@ export default function Home() {
               <button
                 type="submit"
                 disabled={isGenerating}
-                className="h-12 rounded-lg bg-[#4a2f20] px-4 text-sm font-bold text-white transition hover:bg-[#62402b] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a2f20] disabled:cursor-not-allowed disabled:bg-[#a9a29e]"
+                className="h-12 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-[2px] active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
               >
                 {isGenerating
                   ? `${
@@ -1072,10 +1251,86 @@ export default function Home() {
             </div>
           </form>
 
-          <section className="flex min-h-[520px] flex-col rounded-lg border border-black/10 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/10 px-5 py-4">
+          <section className="flex flex-col items-center gap-4">
+            <div className="relative aspect-square w-[600px] max-w-[calc(100%-1rem)] flex-none">
               <div
-                className="grid grid-cols-2 gap-1 rounded-lg bg-[#eee4cd] p-1"
+                id="generated-image-panel"
+                role="tabpanel"
+                className="absolute inset-[7.333%] z-10 flex items-center justify-center overflow-hidden rounded-full border-[10px] border-[#22d3ee] bg-white shadow-md"
+              >
+                {activeResult?.image ? (
+                  activeResultView === "avatar" &&
+                  avatarFrames.length === AVATAR_FRAME_LABELS.length ? (
+                    avatarFrames.map((frame, index) => (
+                      <Image
+                        key={`${AVATAR_FRAME_LABELS[index]}-${index}`}
+                        src={frame}
+                        alt={`生成したアバター（${AVATAR_FRAME_LABELS[index]}）`}
+                        fill
+                        sizes="(max-width: 640px) calc(100vw - 5rem), 512px"
+                        unoptimized
+                        aria-hidden={index !== activeAvatarFrameIndex}
+                        className={`object-contain ${
+                          index === activeAvatarFrameIndex
+                            ? "opacity-100"
+                            : "opacity-0"
+                        }`}
+                      />
+                    ))
+                  ) : (
+                    <Image
+                      src={activeResult.image}
+                      alt={`生成した${activeResultLabel}`}
+                      fill
+                      sizes="(max-width: 640px) calc(100vw - 5rem), 512px"
+                      unoptimized
+                      className="object-contain"
+                    />
+                  )
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center px-10 text-center text-sm text-[#686f7b]">
+                    {generatingResultView === activeResultView
+                      ? `${activeResultLabel}を生成しています。`
+                      : activeResultView === "character"
+                        ? "属性から生成した基本キャラクターがここに表示されます。"
+                        : "ポーズから生成したアバターがここに表示されます。"}
+                  </div>
+                )}
+              </div>
+              <svg
+                viewBox="0 0 600 600"
+                aria-hidden="true"
+                focusable="false"
+                className="pointer-events-none absolute inset-0 z-20 h-full w-full"
+              >
+                <path
+                  d="M 136.6 524.91 A 278 278 0 1 1 463.4 524.91"
+                  fill="none"
+                  stroke="#ffd84d"
+                  strokeWidth="42"
+                  strokeLinecap="round"
+                  opacity="0.28"
+                />
+                <path
+                  key={`${generationProgressRunId}-${activeResultView}`}
+                  d="M 136.6 524.91 A 278 278 0 1 1 463.4 524.91"
+                  pathLength="100"
+                  fill="none"
+                  stroke="#ffd84d"
+                  strokeWidth="42"
+                  strokeLinecap="round"
+                  strokeDasharray="100"
+                  strokeDashoffset={100 - visibleGenerationProgress}
+                  style={{
+                    transition: "stroke-dashoffset 600ms linear",
+                  }}
+                />
+              </svg>
+            </div>
+
+            <div className="flex w-full max-w-[512px] flex-col items-center gap-2">
+              <div
+                className="grid grid-cols-2 gap-1 rounded-lg border border-[#0891b2]/30 bg-white p-1"
                 role="tablist"
                 aria-label="生成画像の表示"
               >
@@ -1092,10 +1347,10 @@ export default function Home() {
                       aria-selected={isActive}
                       aria-controls="generated-image-panel"
                       onClick={() => setActiveResultView(view)}
-                      className={`rounded-md px-4 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5a371f] ${
+                      className={`rounded-md px-4 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                         isActive
-                          ? "bg-[#4a2f20] text-white shadow-sm"
-                          : "text-[#554c43] hover:bg-white/70"
+                          ? "bg-[#22d3ee] text-[#083344] shadow-sm"
+                          : "text-[#083344] hover:bg-[#e6faff]"
                       }`}
                     >
                       {label}
@@ -1104,75 +1359,121 @@ export default function Home() {
                 })}
               </div>
 
-              {activeResult?.image ? (
-                <div className="flex items-center gap-2">
-                  {IS_DEVELOPMENT && activeResult.provider ? (
-                    <span className="rounded-full border border-black/10 bg-[#fff7d6] px-2.5 py-1 text-[11px] font-bold text-[#62420e]">
-                      {activeResult.provider === "openai"
-                        ? "GPT Image 2"
-                        : "Nano Banana 2"}
+              {IS_DEVELOPMENT &&
+              !isProductionUiPreview &&
+              activeResult?.image &&
+              activeResult.provider ? (
+                <span className="rounded-full border border-black/10 bg-[#fff7d6] px-2.5 py-1 text-[11px] font-bold text-[#62420e]">
+                  {activeResult.provider === "openai"
+                    ? "GPT Image 2"
+                    : "Nano Banana 2"}
+                </span>
+              ) : null}
+
+              {IS_DEVELOPMENT &&
+              !isProductionUiPreview &&
+              activeResultView === "avatar" &&
+              avatarFrames.length === AVATAR_FRAME_LABELS.length ? (
+                <div className="w-full rounded-xl border border-[#0891b2]/30 bg-white p-3 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-sm font-bold text-[#083344]">
+                      4フレーム確認
+                    </p>
+                    <span className="rounded-full border border-[#d8b146] bg-[#fff7d6] px-2 py-0.5 text-[10px] font-bold text-[#74500d]">
+                      開発環境のみ
                     </span>
-                  ) : null}
-                  <a
-                    href={activeResult.image}
-                    download={`chibi-${activeResultView}.png`}
-                    className="rounded-md border border-black/10 px-3 py-2 text-sm font-medium transition hover:bg-[#f6f7fb]"
+                  </div>
+
+                  <div
+                    role="group"
+                    aria-label="アバターの再生状態"
+                    className="grid grid-cols-2 gap-1 rounded-lg border border-[#0891b2]/20 bg-[#e6faff] p-1"
                   >
-                    画像を保存
-                  </a>
+                    <button
+                      type="button"
+                      aria-pressed={isAvatarPreviewPlaying}
+                      onClick={() => {
+                        setIsAvatarMouthOpen(false);
+                        setAreAvatarEyesClosed(false);
+                        setIsAvatarPreviewPlaying(true);
+                      }}
+                      className={`rounded-md px-3 py-2 text-xs font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                        isAvatarPreviewPlaying
+                          ? "bg-[#22d3ee] text-[#083344] shadow-sm"
+                          : "bg-white text-[#35515f] hover:bg-[#f5fdff]"
+                      }`}
+                    >
+                      自動再生
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={!isAvatarPreviewPlaying}
+                      onClick={() => {
+                        if (isAvatarPreviewPlaying) {
+                          setSelectedAvatarFrameIndex(
+                            animatedAvatarFrameIndex,
+                          );
+                        }
+                        setIsAvatarPreviewPlaying(false);
+                      }}
+                      className={`rounded-md px-3 py-2 text-xs font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d8b146] ${
+                        !isAvatarPreviewPlaying
+                          ? "bg-[#ffd84d] text-[#513a00] shadow-sm"
+                          : "bg-white text-[#5f5848] hover:bg-[#fffdf2]"
+                      }`}
+                    >
+                      停止
+                    </button>
+                  </div>
+
+                  <div
+                    role="group"
+                    aria-label="確認するアバターフレーム"
+                    className="mt-2 grid grid-cols-2 gap-2"
+                  >
+                    {AVATAR_FRAME_LABELS.map((label, index) => {
+                      const isSelected =
+                        !isAvatarPreviewPlaying &&
+                        selectedAvatarFrameIndex === index;
+
+                      return (
+                        <button
+                          key={label}
+                          type="button"
+                          aria-pressed={isSelected}
+                          onClick={() => {
+                            setSelectedAvatarFrameIndex(index);
+                            setIsAvatarPreviewPlaying(false);
+                          }}
+                          className={`rounded-lg border px-2 py-2 text-xs font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                            isSelected
+                              ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-sm"
+                              : "border-black/10 bg-white text-[#403b35] hover:border-[#0891b2]/50 hover:bg-[#e6faff]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               ) : null}
-            </div>
-
-            <div
-              id="generated-image-panel"
-              role="tabpanel"
-              className="flex flex-1 items-center justify-center p-5"
-            >
-              {activeResult?.image ? (
-                activeResultView === "avatar" &&
-                avatarFrames.length === AVATAR_FRAME_LABELS.length ? (
-                  <div className="relative aspect-square w-full max-w-[512px] overflow-hidden rounded-md">
-                    {avatarFrames.map((frame, index) => (
-                      <Image
-                        key={`${AVATAR_FRAME_LABELS[index]}-${index}`}
-                        src={frame}
-                        alt={`生成したアバター（${AVATAR_FRAME_LABELS[index]}）`}
-                        fill
-                        sizes="(max-width: 1024px) 100vw, 512px"
-                        unoptimized
-                        aria-hidden={index !== activeAvatarFrameIndex}
-                        className={`object-contain ${
-                          index === activeAvatarFrameIndex
-                            ? "opacity-100"
-                            : "opacity-0"
-                        }`}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <Image
-                    src={activeResult.image}
-                    alt={`生成した${activeResultLabel}`}
-                    width={512}
-                    height={512}
-                    unoptimized
-                    className="h-auto max-h-[70vh] w-full max-w-[720px] rounded-md object-contain"
-                  />
-                )
-              ) : (
-                <div className="flex aspect-square w-full max-w-[560px] items-center justify-center rounded-md border border-dashed border-black/15 bg-[#fafbff] text-center text-sm text-[#686f7b]">
-                  {generatingResultView === activeResultView
-                    ? `${activeResultLabel}を生成しています。`
-                    : activeResultView === "character"
-                      ? "属性から生成した基本キャラクターがここに表示されます。"
-                      : "ポーズから生成したアバターがここに表示されます。"}
-                </div>
-              )}
             </div>
           </section>
         </div>
       </main>
+      {IS_DEVELOPMENT && isProductionUiPreview ? (
+        <button
+          type="button"
+          onClick={() => setIsProductionUiPreview(false)}
+          className="fixed right-4 bottom-4 z-50 flex items-center gap-2 rounded-full border border-[#0891b2] bg-white px-3 py-2 text-xs font-bold text-[#083344] shadow-lg transition hover:bg-[#e6faff] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] sm:right-6 sm:bottom-6"
+        >
+          <span className="rounded-full bg-[#22d3ee] px-2 py-1">
+            本番UIプレビュー中
+          </span>
+          <span>開発UIに戻る</span>
+        </button>
+      ) : null}
     </div>
   );
 }

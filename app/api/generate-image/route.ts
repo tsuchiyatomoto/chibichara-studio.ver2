@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
+import { ApiError, GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { statSync } from "node:fs";
 import OpenAI, { APIConnectionTimeoutError, toFile } from "openai";
 
@@ -9,12 +9,14 @@ const VERTEX_MODEL_ID =
 const OPENAI_MODEL_ID = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-2";
 const LOCATION = process.env.GOOGLE_CLOUD_LOCATION ?? "global";
 const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
+const VERTEX_RETRY_ATTEMPTS = 6;
 const MAX_PROMPT_LENGTH = 2000;
 const MAX_REFERENCE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 type RequestBody = {
   prompt?: unknown;
   referenceImage?: unknown;
+  secondaryReferenceImage?: unknown;
   provider?: unknown;
 };
 
@@ -59,6 +61,16 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+function isVertexResourceExhausted(error: unknown) {
+  if (error instanceof ApiError && error.status === 429) {
+    return true;
+  }
+
+  return /(?:\b429\b|RESOURCE_EXHAUSTED|Too Many Requests|resource (?:has been )?exhausted)/i.test(
+    getErrorMessage(error),
+  );
+}
+
 function getCredentialFileError() {
   const path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
@@ -75,13 +87,16 @@ function getCredentialFileError() {
   }
 }
 
-function parseReferenceImage(value: unknown): InlineImage | undefined {
+function parseReferenceImage(
+  value: unknown,
+  fieldName: "referenceImage" | "secondaryReferenceImage",
+): InlineImage | undefined {
   if (value === undefined || value === null || value === "") {
     return;
   }
 
   if (typeof value !== "string") {
-    throw new Error("referenceImage must be a base64 image data URL.");
+    throw new Error(`${fieldName} must be a base64 image data URL.`);
   }
 
   const match = value.match(
@@ -89,14 +104,16 @@ function parseReferenceImage(value: unknown): InlineImage | undefined {
   );
 
   if (!match) {
-    throw new Error("referenceImage must be a PNG, JPEG, or WebP data URL.");
+    throw new Error(
+      `${fieldName} must be a PNG, JPEG, or WebP data URL.`,
+    );
   }
 
   const [, mimeType, data] = match;
   const byteLength = Buffer.from(data, "base64").byteLength;
 
   if (byteLength === 0 || byteLength > MAX_REFERENCE_IMAGE_BYTES) {
-    throw new Error("referenceImage must be between 1 byte and 5 MB.");
+    throw new Error(`${fieldName} must be between 1 byte and 5 MB.`);
   }
 
   return { data, mimeType };
@@ -140,11 +157,23 @@ export async function POST(request: Request) {
   }
 
   let referenceImage: InlineImage | undefined;
+  let secondaryReferenceImage: InlineImage | undefined;
 
   try {
-    referenceImage = parseReferenceImage(body.referenceImage);
+    referenceImage = parseReferenceImage(body.referenceImage, "referenceImage");
+    secondaryReferenceImage = parseReferenceImage(
+      body.secondaryReferenceImage,
+      "secondaryReferenceImage",
+    );
   } catch (error) {
     return jsonError(getErrorMessage(error), 400);
+  }
+
+  if (secondaryReferenceImage && !referenceImage) {
+    return jsonError(
+      "secondaryReferenceImage requires referenceImage.",
+      400,
+    );
   }
 
   const provider: ImageProvider =
@@ -164,30 +193,48 @@ export async function POST(request: Request) {
     });
 
     try {
-      const response = referenceImage
-        ? await openai.images.edit({
-            model: OPENAI_MODEL_ID,
-            image: await toFile(
-              Buffer.from(referenceImage.data, "base64"),
-              referenceImage.mimeType === "image/jpeg"
-                ? "reference.jpg"
-                : `reference.${referenceImage.mimeType.split("/")[1]}`,
-              { type: referenceImage.mimeType },
-            ),
-            prompt,
-            background: "opaque",
-            output_format: "png",
-            quality: "high",
-            size: "1024x1024",
-          })
-        : await openai.images.generate({
-            model: OPENAI_MODEL_ID,
-            prompt,
-            background: "opaque",
-            output_format: "png",
-            quality: "high",
-            size: "1024x1024",
-          });
+      let response;
+
+      if (referenceImage) {
+        const referenceImages = [
+          referenceImage,
+          ...(secondaryReferenceImage ? [secondaryReferenceImage] : []),
+        ];
+        const imageFiles = await Promise.all(
+          referenceImages.map((image, index) => {
+            const extension =
+              image.mimeType === "image/jpeg"
+                ? "jpg"
+                : image.mimeType.split("/")[1];
+
+            return toFile(
+              Buffer.from(image.data, "base64"),
+              `reference-${index + 1}.${extension}`,
+              { type: image.mimeType },
+            );
+          }),
+        );
+
+        response = await openai.images.edit({
+          model: OPENAI_MODEL_ID,
+          image: imageFiles.length === 1 ? imageFiles[0] : imageFiles,
+          prompt,
+          background: "opaque",
+          output_format: "png",
+          quality: "high",
+          size: "1024x1024",
+        });
+      } else {
+        response = await openai.images.generate({
+          model: OPENAI_MODEL_ID,
+          prompt,
+          background: "opaque",
+          output_format: "png",
+          quality: "high",
+          size: "1024x1024",
+        });
+      }
+
       const imageData = response.data?.[0]?.b64_json;
 
       if (!imageData) {
@@ -249,6 +296,9 @@ export async function POST(request: Request) {
     location: LOCATION,
     httpOptions: {
       timeout: 120000,
+      retryOptions: {
+        attempts: VERTEX_RETRY_ATTEMPTS,
+      },
     },
   });
 
@@ -261,6 +311,9 @@ export async function POST(request: Request) {
               role: "user",
               parts: [
                 { inlineData: referenceImage },
+                ...(secondaryReferenceImage
+                  ? [{ inlineData: secondaryReferenceImage }]
+                  : []),
                 { text: prompt },
               ],
             },
@@ -269,7 +322,7 @@ export async function POST(request: Request) {
       config: {
         responseModalities: [Modality.IMAGE],
         thinkingConfig: {
-          thinkingLevel: ThinkingLevel.HIGH,
+          thinkingLevel: ThinkingLevel.MINIMAL,
         },
         imageConfig: {
           aspectRatio: "1:1",
@@ -301,6 +354,16 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Vertex AI image generation failed:", error);
+
+    if (isVertexResourceExhausted(error)) {
+      return jsonError(
+        "Vertex AI が混雑しています。自動再試行しても生成できませんでした。1〜2分待ってから、もう一度アバターを生成してください。",
+        429,
+        process.env.NODE_ENV === "development"
+          ? getErrorMessage(error)
+          : undefined,
+      );
+    }
 
     return jsonError(
       "Vertex AI image generation failed. Check server logs and Google Cloud credentials.",
