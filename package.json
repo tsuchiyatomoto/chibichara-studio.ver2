@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "tts:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-irodori-tts.ps1",
+    "tts:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-irodori-tts.ps1",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
