@@ -1,0 +1,43 @@
+diff --git a/src/irodori_openai_tts/app.py b/src/irodori_openai_tts/app.py
+index 7d8f823..5c17a4f 100644
+--- a/src/irodori_openai_tts/app.py
++++ b/src/irodori_openai_tts/app.py
+@@ -441,6 +441,19 @@ def get_voice_asset(
+         raise HTTPException(status_code=404, detail="Voice asset was not found.") from exc
+ 
+ 
++@app.get("/v1/audio/voice-assets/{asset_id}/content", dependencies=[Depends(require_auth)])
++def snapshot_voice_asset(
++    asset_id: str, owner_id: str = Depends(require_owner_id),
++) -> Response:
++    try:
++        data = voice_asset_store.snapshot_bytes(owner_id, asset_id)
++        return Response(data, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
++    except ValueError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    except VoiceAssetNotFoundError as exc:
++        raise HTTPException(status_code=404, detail="Voice asset was not found.") from exc
++
++
+ @app.delete(
+     "/v1/audio/voice-assets/{asset_id}",
+     dependencies=[Depends(require_auth)],
+diff --git a/src/irodori_openai_tts/voice_assets.py b/src/irodori_openai_tts/voice_assets.py
+index a648e13..b858462 100644
+--- a/src/irodori_openai_tts/voice_assets.py
++++ b/src/irodori_openai_tts/voice_assets.py
+@@ -138,6 +138,14 @@ class VoiceAssetStore:
+             raise VoiceAssetNotFoundError(asset_id)
+         return asset
+ 
++    def snapshot_bytes(self, owner_id: str, asset_id: str) -> bytes:
++        """Read immutable bytes while excluding replacement and expiry cleanup."""
++        with self._lock:
++            asset = self.get(owner_id, asset_id)
++            if asset.kind != SPEAKER_KIND:
++                raise ValueError("Only speaker embeddings can be snapshotted.")
++            return asset.path.read_bytes()
++
+     def resolve(self, owner_id: str, asset_id: str) -> VoiceSpec:
+         asset = self.get(owner_id, asset_id)
+         if asset.kind == SPEAKER_KIND:

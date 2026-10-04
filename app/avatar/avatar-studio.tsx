@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useEffect, useState } from "react";
+import { type SubmitEvent, useEffect, useState } from "react";
 
 type GenerateImageResponse = {
   image?: string;
@@ -364,13 +364,11 @@ const INITIAL_CUSTOM_PROMPTS: Record<AttributeId, string> = {
 };
 
 export default function AvatarStudio() {
-  const [imageProvider, setImageProvider] =
-    useState<ImageProvider>("vertex");
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("vertex");
   const [isProductionUiPreview, setIsProductionUiPreview] = useState(false);
   const [activeEditorSection, setActiveEditorSection] =
     useState<EditorSection>("attributes");
-  const [activeAttribute, setActiveAttribute] =
-    useState<AttributeId>("gender");
+  const [activeAttribute, setActiveAttribute] = useState<AttributeId>("gender");
   const [attributeSelections, setAttributeSelections] = useState(
     INITIAL_ATTRIBUTE_SELECTIONS,
   );
@@ -381,9 +379,7 @@ export default function AvatarStudio() {
   const [globalCharacterPrompt, setGlobalCharacterPrompt] = useState("");
   const [activePoseGroupId, setActivePoseGroupId] =
     useState<PoseGroupId>("basic");
-  const [poseSelections, setPoseSelections] = useState(
-    INITIAL_POSE_SELECTIONS,
-  );
+  const [poseSelections, setPoseSelections] = useState(INITIAL_POSE_SELECTIONS);
   const [poseCustomModes, setPoseCustomModes] = useState(
     INITIAL_POSE_CUSTOM_MODES,
   );
@@ -406,8 +402,7 @@ export default function AvatarStudio() {
   const [generatingResultView, setGeneratingResultView] =
     useState<ResultView | null>(null);
   const [generationProgress, setGenerationProgress] = useState(100);
-  const [generationProgressTarget, setGenerationProgressTarget] =
-    useState(100);
+  const [generationProgressTarget, setGenerationProgressTarget] = useState(100);
   const [generationProgressRunId, setGenerationProgressRunId] = useState(0);
   const [error, setError] = useState("");
 
@@ -420,8 +415,8 @@ export default function AvatarStudio() {
       ? customModes.gender
         ? HAIRSTYLE_OPTIONS
         : attributeSelections.gender === "男の子"
-        ? MALE_HAIRSTYLE_OPTIONS
-        : FEMALE_HAIRSTYLE_OPTIONS
+          ? MALE_HAIRSTYLE_OPTIONS
+          : FEMALE_HAIRSTYLE_OPTIONS
       : activeGroup.options;
   const activePoseGroup =
     POSE_GROUPS.find(({ id }) => id === activePoseGroupId) ?? POSE_GROUPS[0];
@@ -436,9 +431,7 @@ export default function AvatarStudio() {
   const animatedAvatarFrameIndex =
     (areAvatarEyesClosed ? 2 : 0) + (isAvatarMouthOpen ? 1 : 0);
   const isAvatarFrameInspectionPaused =
-    IS_DEVELOPMENT &&
-    !isProductionUiPreview &&
-    !isAvatarPreviewPlaying;
+    IS_DEVELOPMENT && !isProductionUiPreview && !isAvatarPreviewPlaying;
   const activeAvatarFrameIndex = isAvatarFrameInspectionPaused
     ? selectedAvatarFrameIndex
     : animatedAvatarFrameIndex;
@@ -528,7 +521,7 @@ export default function AvatarStudio() {
     });
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     const target = generationTarget;
     const selectedImageProvider = isProductionUiPreview
@@ -555,8 +548,7 @@ export default function AvatarStudio() {
     const emptyCustomGroup =
       target === "character" && attributeInputMode === "guided"
         ? ATTRIBUTE_GROUPS.find(
-            (group) =>
-              customModes[group.id] && !customPrompts[group.id].trim(),
+            (group) => customModes[group.id] && !customPrompts[group.id].trim(),
           )
         : undefined;
 
@@ -607,9 +599,7 @@ export default function AvatarStudio() {
             ? `User-specified character design: ${globalCharacterPrompt.trim()}`
             : `Character attributes: ${ATTRIBUTE_GROUPS.flatMap((group) => {
                 if (customModes[group.id]) {
-                  return [
-                    `${group.label}: ${customPrompts[group.id].trim()}`,
-                  ];
+                  return [`${group.label}: ${customPrompts[group.id].trim()}`];
                 }
 
                 const selectedOption = group.options.find(
@@ -705,8 +695,8 @@ export default function AvatarStudio() {
             alt=""
             width={72}
             height={72}
-            priority
-            className="h-[72px] w-[72px] rounded-md object-contain"
+            preload
+            className="h-18 w-18 rounded-md object-contain"
           />
           <h1 className="text-4xl font-semibold tracking-tight">
             chibichara studio
@@ -781,7 +771,7 @@ export default function AvatarStudio() {
                   className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                     activeEditorSection === "attributes"
                       ? "bg-[#22d3ee] text-[#083344] shadow-sm"
-                    : "text-[#083344] hover:bg-[#e6faff]"
+                      : "text-[#083344] hover:bg-[#e6faff]"
                   }`}
                 >
                   <span className="block text-sm font-bold">属性</span>
@@ -793,7 +783,7 @@ export default function AvatarStudio() {
                   className={`rounded-lg px-4 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                     activeEditorSection === "pose"
                       ? "bg-[#22d3ee] text-[#083344] shadow-sm"
-                    : "text-[#083344] hover:bg-[#e6faff]"
+                      : "text-[#083344] hover:bg-[#e6faff]"
                   }`}
                 >
                   <span className="block text-sm font-bold">ポーズ</span>
@@ -802,266 +792,284 @@ export default function AvatarStudio() {
 
               {activeEditorSection === "attributes" ? (
                 <>
-              <div className="mb-2 flex items-start justify-between gap-4">
-                <div>
-                  <p className="mb-1 text-xs font-bold tracking-[0.18em] text-[#9b6b16] uppercase">
-                    Character attributes
-                  </p>
-                  <h2 className="text-xl font-bold tracking-tight">属性</h2>
-                </div>
-                <button
-                  type="button"
-                  aria-pressed={attributeInputMode === "free"}
-                  aria-controls="global-character-prompt-panel"
-                  aria-label="キャラクター全体を文章で指定"
-                  title="キャラクター全体を文章で指定"
-                  onClick={() => {
-                    setAttributeInputMode((current) =>
-                      current === "guided" ? "free" : "guided",
-                    );
-                    setError("");
-                  }}
-                  className={`flex h-10 shrink-0 items-center gap-2 rounded-lg border px-3 text-sm font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                    attributeInputMode === "free"
-                      ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
-                      : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
-                  }`}
-                >
-                  <span className="font-serif text-base font-black">T</span>
-                  <span>全体指定</span>
-                </button>
-              </div>
-              <p className="mb-5 text-sm leading-6 text-[#686052]">
-                {attributeInputMode === "free"
-                  ? "カテゴリに縛られず、キャラクター全体の特徴を文章で指定できます。"
-                  : "カテゴリを切り替えて、キャラクターの特徴を選んでください。"}
-              </p>
-
-              {attributeInputMode === "free" ? (
-                <div
-                  id="global-character-prompt-panel"
-                  className="rounded-xl border border-[#d8b146]/70 bg-white p-4 shadow-sm"
-                >
-                  <label
-                    htmlFor="global-character-prompt"
-                    className="mb-3 block text-sm font-bold text-[#083344]"
-                  >
-                    キャラクター全体を文章で指定
-                  </label>
-                  <textarea
-                    id="global-character-prompt"
-                    autoFocus
-                    value={globalCharacterPrompt}
-                    onChange={(event) => {
-                      setGlobalCharacterPrompt(event.target.value);
-                      setError("");
-                    }}
-                    rows={8}
-                    maxLength={GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
-                    placeholder={GLOBAL_CHARACTER_PROMPT_PLACEHOLDER}
-                    aria-describedby="global-character-prompt-help global-character-prompt-fixed"
-                    className="w-full resize-y rounded-lg border border-black/15 bg-[#fffefa] px-3 py-2.5 text-sm leading-6 outline-none transition placeholder:text-[#9a9389] focus:border-[#d4a51c] focus:ring-2 focus:ring-[#ffd84d]/30"
-                  />
-                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[#777067]">
-                    <span>この文章だけを属性として使用します</span>
-                    <span>
-                      {globalCharacterPrompt.length}/
-                      {GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
-                    </span>
-                  </div>
-                  <div className="mt-4 space-y-2 rounded-lg bg-[#fff7d6]/70 p-3 text-xs leading-5 text-[#62584d]">
-                    <p id="global-character-prompt-help">
-                      <span className="font-bold text-[#083344]">指定例：</span>
-                      種族、年齢感、体格、肌、顔、耳、角、尻尾、模様、装飾、衣装、素材、雰囲気
-                    </p>
-                    <p id="global-character-prompt-fixed">
-                      <span className="font-bold text-[#083344]">固定：</span>
-                      ちびキャラ・1人・全身・白背景・少し左向き・目開き・口閉じ。ポーズはポーズ画面で指定します。
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <>
-              <div
-                className="grid grid-cols-2 gap-2 sm:grid-cols-3"
-                aria-label="属性カテゴリ"
-              >
-                {ATTRIBUTE_GROUPS.map((group) => {
-                  const isActive = activeAttribute === group.id;
-                  const isCustom = customModes[group.id];
-                  const selectedSwatch = isCustom
-                    ? undefined
-                    : COLOR_SWATCHES[group.id]?.[
-                        attributeSelections[group.id]
-                      ];
-
-                  return (
+                  <div className="mb-2 flex items-start justify-between gap-4">
+                    <div>
+                      <p className="mb-1 text-xs font-bold tracking-[0.18em] text-[#9b6b16] uppercase">
+                        Character attributes
+                      </p>
+                      <h2 className="text-xl font-bold tracking-tight">属性</h2>
+                    </div>
                     <button
-                      key={group.id}
                       type="button"
-                      aria-pressed={isActive}
-                      onClick={() => setActiveAttribute(group.id)}
-                      className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                        isActive
-                          ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-[0_2px_0_#0891b2]"
-                          : "border-black/10 bg-white text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
+                      aria-pressed={attributeInputMode === "free"}
+                      aria-controls="global-character-prompt-panel"
+                      aria-label="キャラクター全体を文章で指定"
+                      title="キャラクター全体を文章で指定"
+                      onClick={() => {
+                        setAttributeInputMode((current) =>
+                          current === "guided" ? "free" : "guided",
+                        );
+                        setError("");
+                      }}
+                      className={`flex h-10 shrink-0 items-center gap-2 rounded-lg border px-3 text-sm font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                        attributeInputMode === "free"
+                          ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                          : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
                       }`}
                     >
-                      <span className="block text-sm font-bold">
-                        {group.label}
-                      </span>
-                      <span
-                        className={`mt-0.5 flex min-h-4 items-center text-[11px] ${
-                          isActive ? "text-[#075985]" : "text-[#777067]"
-                        }`}
-                      >
-                        {isCustom ? (
-                          <span className="font-semibold">T&nbsp; 文章指定</span>
-                        ) : selectedSwatch ? (
-                          <>
-                            <span
-                              aria-hidden="true"
-                              className="h-3.5 w-3.5 rounded-full border border-black/20 shadow-sm"
-                              style={{
-                                background:
-                                  getSwatchBackground(selectedSwatch),
-                              }}
-                            />
-                            <span className="sr-only">
-                              {attributeSelections[group.id]}
-                            </span>
-                          </>
-                        ) : (
-                          <span className="truncate">
-                            {attributeSelections[group.id]}
-                          </span>
-                        )}
-                      </span>
+                      <span className="font-serif text-base font-black">T</span>
+                      <span>全体指定</span>
                     </button>
-                  );
-                })}
-              </div>
+                  </div>
+                  <p className="mb-5 text-sm leading-6 text-[#686052]">
+                    {attributeInputMode === "free"
+                      ? "カテゴリに縛られず、キャラクター全体の特徴を文章で指定できます。"
+                      : "カテゴリを切り替えて、キャラクターの特徴を選んでください。"}
+                  </p>
 
-              <div className="mt-5 rounded-xl border border-black/10 bg-white p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-bold">{activeGroup.label}</h3>
-                  <button
-                    type="button"
-                    aria-pressed={customModes[activeGroup.id]}
-                    aria-label={`${activeGroup.label}を文章で指定`}
-                    title="文章で指定"
-                    onClick={() => handleCustomModeToggle(activeGroup.id)}
-                    className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                      customModes[activeGroup.id]
-                        ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
-                        : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
-                    }`}
-                  >
-                    T
-                  </button>
-                </div>
-                {customModes[activeGroup.id] ? (
-                  <div className="rounded-lg border border-[#d8b146]/60 bg-[#fffdf5] p-3">
-                    <label
-                      htmlFor={`custom-prompt-${activeGroup.id}`}
-                      className="mb-2 block text-xs font-bold text-[#087ea4]"
+                  {attributeInputMode === "free" ? (
+                    <div
+                      id="global-character-prompt-panel"
+                      className="rounded-xl border border-[#d8b146]/70 bg-white p-4 shadow-sm"
                     >
-                      文章で指定
-                    </label>
-                    <textarea
-                      id={`custom-prompt-${activeGroup.id}`}
-                      autoFocus
-                      value={customPrompts[activeGroup.id]}
-                      onChange={(event) =>
-                        setCustomPrompts((current) => ({
-                          ...current,
-                          [activeGroup.id]: event.target.value,
-                        }))
-                      }
-                      rows={4}
-                      maxLength={160}
-                      placeholder={CUSTOM_PROMPT_PLACEHOLDERS[activeGroup.id]}
-                      className="w-full resize-y rounded-lg border border-black/15 bg-white px-3 py-2.5 text-sm leading-6 outline-none transition placeholder:text-[#9a9389] focus:border-[#d4a51c] focus:ring-2 focus:ring-[#ffd84d]/30"
-                    />
-                    <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[#777067]">
-                      <span>候補ボタンの指定は使用しません</span>
-                      <span>{customPrompts[activeGroup.id].length}/160</span>
+                      <label
+                        htmlFor="global-character-prompt"
+                        className="mb-3 block text-sm font-bold text-[#083344]"
+                      >
+                        キャラクター全体を文章で指定
+                      </label>
+                      <textarea
+                        id="global-character-prompt"
+                        autoFocus
+                        value={globalCharacterPrompt}
+                        onChange={(event) => {
+                          setGlobalCharacterPrompt(event.target.value);
+                          setError("");
+                        }}
+                        rows={8}
+                        maxLength={GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
+                        placeholder={GLOBAL_CHARACTER_PROMPT_PLACEHOLDER}
+                        aria-describedby="global-character-prompt-help global-character-prompt-fixed"
+                        className="w-full resize-y rounded-lg border border-black/15 bg-[#fffefa] px-3 py-2.5 text-sm leading-6 outline-none transition placeholder:text-[#9a9389] focus:border-[#d4a51c] focus:ring-2 focus:ring-[#ffd84d]/30"
+                      />
+                      <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[#777067]">
+                        <span>この文章だけを属性として使用します</span>
+                        <span>
+                          {globalCharacterPrompt.length}/
+                          {GLOBAL_CHARACTER_PROMPT_MAX_LENGTH}
+                        </span>
+                      </div>
+                      <div className="mt-4 space-y-2 rounded-lg bg-[#fff7d6]/70 p-3 text-xs leading-5 text-[#62584d]">
+                        <p id="global-character-prompt-help">
+                          <span className="font-bold text-[#083344]">
+                            指定例：
+                          </span>
+                          種族、年齢感、体格、肌、顔、耳、角、尻尾、模様、装飾、衣装、素材、雰囲気
+                        </p>
+                        <p id="global-character-prompt-fixed">
+                          <span className="font-bold text-[#083344]">
+                            固定：
+                          </span>
+                          ちびキャラ・1人・全身・白背景・少し左向き・目開き・口閉じ。ポーズはポーズ画面で指定します。
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <div
-                    className={
-                      activeColorSwatches
-                        ? "grid grid-cols-5 gap-3 sm:grid-cols-7"
-                        : activeOptions.length === 2
-                          ? "grid grid-cols-2 gap-2"
-                          : "grid grid-cols-2 gap-2 sm:grid-cols-3"
-                    }
-                    aria-label={`${activeGroup.label}の選択肢`}
-                  >
-                    {activeOptions.map(({ label }) => {
-                      const isSelected =
-                        attributeSelections[activeGroup.id] === label;
-                      const swatch = activeColorSwatches?.[label];
+                  ) : (
+                    <>
+                      <div
+                        className="grid grid-cols-2 gap-2 sm:grid-cols-3"
+                        aria-label="属性カテゴリ"
+                      >
+                        {ATTRIBUTE_GROUPS.map((group) => {
+                          const isActive = activeAttribute === group.id;
+                          const isCustom = customModes[group.id];
+                          const selectedSwatch = isCustom
+                            ? undefined
+                            : COLOR_SWATCHES[group.id]?.[
+                                attributeSelections[group.id]
+                              ];
 
-                      return (
-                        <button
-                          key={label}
-                          type="button"
-                          aria-pressed={isSelected}
-                          aria-label={
-                            swatch
-                              ? `${activeGroup.label}: ${label}`
-                              : undefined
-                          }
-                          title={swatch ? label : undefined}
-                          onClick={() =>
-                            handleAttributeSelection(activeGroup.id, label)
-                          }
-                          className={
-                            swatch
-                              ? `relative aspect-square rounded-xl border p-1.5 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                                  isSelected
-                                    ? "border-[#0891b2] bg-white shadow-[0_0_0_2px_#ffd84d]"
-                                    : "border-black/15 bg-white hover:-translate-y-0.5 hover:border-[#d8b146] hover:shadow-sm"
-                                }`
-                              : `min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                                  isSelected
-                                    ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
-                                    : "border-black/10 bg-[#fffefa] text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
-                                }`
-                          }
-                        >
-                          {swatch ? (
-                            <>
+                          return (
+                            <button
+                              key={group.id}
+                              type="button"
+                              aria-pressed={isActive}
+                              onClick={() => setActiveAttribute(group.id)}
+                              className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                                isActive
+                                  ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                                  : "border-black/10 bg-white text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
+                              }`}
+                            >
+                              <span className="block text-sm font-bold">
+                                {group.label}
+                              </span>
                               <span
-                                aria-hidden="true"
-                                className="block h-full w-full rounded-lg border border-black/15 shadow-inner"
-                                style={{
-                                  background: getSwatchBackground(swatch),
-                                }}
-                              />
-                              {isSelected ? (
-                                <span
-                                  aria-hidden="true"
-                                  className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#22d3ee] text-[11px] font-bold text-[#083344] shadow-sm"
+                                className={`mt-0.5 flex min-h-4 items-center text-[11px] ${
+                                  isActive ? "text-[#075985]" : "text-[#777067]"
+                                }`}
+                              >
+                                {isCustom ? (
+                                  <span className="font-semibold">
+                                    T&nbsp; 文章指定
+                                  </span>
+                                ) : selectedSwatch ? (
+                                  <>
+                                    <span
+                                      aria-hidden="true"
+                                      className="h-3.5 w-3.5 rounded-full border border-black/20 shadow-sm"
+                                      style={{
+                                        background:
+                                          getSwatchBackground(selectedSwatch),
+                                      }}
+                                    />
+                                    <span className="sr-only">
+                                      {attributeSelections[group.id]}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="truncate">
+                                    {attributeSelections[group.id]}
+                                  </span>
+                                )}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-5 rounded-xl border border-black/10 bg-white p-4">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-bold">
+                            {activeGroup.label}
+                          </h3>
+                          <button
+                            type="button"
+                            aria-pressed={customModes[activeGroup.id]}
+                            aria-label={`${activeGroup.label}を文章で指定`}
+                            title="文章で指定"
+                            onClick={() =>
+                              handleCustomModeToggle(activeGroup.id)
+                            }
+                            className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                              customModes[activeGroup.id]
+                                ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                                : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
+                            }`}
+                          >
+                            T
+                          </button>
+                        </div>
+                        {customModes[activeGroup.id] ? (
+                          <div className="rounded-lg border border-[#d8b146]/60 bg-[#fffdf5] p-3">
+                            <label
+                              htmlFor={`custom-prompt-${activeGroup.id}`}
+                              className="mb-2 block text-xs font-bold text-[#087ea4]"
+                            >
+                              文章で指定
+                            </label>
+                            <textarea
+                              id={`custom-prompt-${activeGroup.id}`}
+                              autoFocus
+                              value={customPrompts[activeGroup.id]}
+                              onChange={(event) =>
+                                setCustomPrompts((current) => ({
+                                  ...current,
+                                  [activeGroup.id]: event.target.value,
+                                }))
+                              }
+                              rows={4}
+                              maxLength={160}
+                              placeholder={
+                                CUSTOM_PROMPT_PLACEHOLDERS[activeGroup.id]
+                              }
+                              className="w-full resize-y rounded-lg border border-black/15 bg-white px-3 py-2.5 text-sm leading-6 outline-none transition placeholder:text-[#9a9389] focus:border-[#d4a51c] focus:ring-2 focus:ring-[#ffd84d]/30"
+                            />
+                            <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[#777067]">
+                              <span>候補ボタンの指定は使用しません</span>
+                              <span>
+                                {customPrompts[activeGroup.id].length}/160
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div
+                            className={
+                              activeColorSwatches
+                                ? "grid grid-cols-5 gap-3 sm:grid-cols-7"
+                                : activeOptions.length === 2
+                                  ? "grid grid-cols-2 gap-2"
+                                  : "grid grid-cols-2 gap-2 sm:grid-cols-3"
+                            }
+                            aria-label={`${activeGroup.label}の選択肢`}
+                          >
+                            {activeOptions.map(({ label }) => {
+                              const isSelected =
+                                attributeSelections[activeGroup.id] === label;
+                              const swatch = activeColorSwatches?.[label];
+
+                              return (
+                                <button
+                                  key={label}
+                                  type="button"
+                                  aria-pressed={isSelected}
+                                  aria-label={
+                                    swatch
+                                      ? `${activeGroup.label}: ${label}`
+                                      : undefined
+                                  }
+                                  title={swatch ? label : undefined}
+                                  onClick={() =>
+                                    handleAttributeSelection(
+                                      activeGroup.id,
+                                      label,
+                                    )
+                                  }
+                                  className={
+                                    swatch
+                                      ? `relative aspect-square rounded-xl border p-1.5 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                                          isSelected
+                                            ? "border-[#0891b2] bg-white shadow-[0_0_0_2px_#ffd84d]"
+                                            : "border-black/15 bg-white hover:-translate-y-0.5 hover:border-[#d8b146] hover:shadow-sm"
+                                        }`
+                                      : `min-h-11 rounded-lg border px-2 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                                          isSelected
+                                            ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                                            : "border-black/10 bg-[#fffefa] text-[#403b35] hover:border-[#d8b146] hover:bg-[#fff7d6]"
+                                        }`
+                                  }
                                 >
-                                  ✓
-                                </span>
-                              ) : null}
-                              <span className="sr-only">{label}</span>
-                            </>
-                          ) : (
-                            label
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-                </>
-              )}
+                                  {swatch ? (
+                                    <>
+                                      <span
+                                        aria-hidden="true"
+                                        className="block h-full w-full rounded-lg border border-black/15 shadow-inner"
+                                        style={{
+                                          background:
+                                            getSwatchBackground(swatch),
+                                        }}
+                                      />
+                                      {isSelected ? (
+                                        <span
+                                          aria-hidden="true"
+                                          className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#22d3ee] text-[11px] font-bold text-[#083344] shadow-sm"
+                                        >
+                                          ✓
+                                        </span>
+                                      ) : null}
+                                      <span className="sr-only">{label}</span>
+                                    </>
+                                  ) : (
+                                    label
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -1130,8 +1138,7 @@ export default function AvatarStudio() {
                         onClick={() => {
                           setPoseCustomModes((current) => ({
                             ...current,
-                            [activePoseGroup.id]:
-                              !current[activePoseGroup.id],
+                            [activePoseGroup.id]: !current[activePoseGroup.id],
                           }));
                           setError("");
                         }}
@@ -1222,7 +1229,7 @@ export default function AvatarStudio() {
               <button
                 type="submit"
                 disabled={isGenerating}
-                className="h-12 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-[2px] active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
+                className="h-12 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-0.5 active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
               >
                 {isGenerating
                   ? `${
@@ -1241,11 +1248,11 @@ export default function AvatarStudio() {
           </form>
 
           <section className="flex flex-col items-center gap-4">
-            <div className="relative aspect-square w-[600px] max-w-[calc(100%-1rem)] flex-none">
+            <div className="relative aspect-square w-150 max-w-[calc(100%-1rem)] flex-none">
               <div
                 id="generated-image-panel"
                 role="tabpanel"
-                className="absolute inset-[7.333%] z-10 flex items-center justify-center overflow-hidden rounded-full border-[10px] border-[#22d3ee] bg-white shadow-md"
+                className="absolute inset-[7.333%] z-10 flex items-center justify-center overflow-hidden rounded-full border-10 border-[#22d3ee] bg-white shadow-md"
               >
                 {activeResult?.image ? (
                   activeResultView === "avatar" &&
@@ -1317,7 +1324,7 @@ export default function AvatarStudio() {
               </svg>
             </div>
 
-            <div className="flex w-full max-w-[512px] flex-col items-center gap-2">
+            <div className="flex w-full max-w-lg flex-col items-center gap-2">
               <div
                 className="grid grid-cols-2 gap-1 rounded-lg border border-[#0891b2]/30 bg-white p-1"
                 role="tablist"
@@ -1399,9 +1406,7 @@ export default function AvatarStudio() {
                       aria-pressed={!isAvatarPreviewPlaying}
                       onClick={() => {
                         if (isAvatarPreviewPlaying) {
-                          setSelectedAvatarFrameIndex(
-                            animatedAvatarFrameIndex,
-                          );
+                          setSelectedAvatarFrameIndex(animatedAvatarFrameIndex);
                         }
                         setIsAvatarPreviewPlaying(false);
                       }}
@@ -1474,9 +1479,7 @@ export default function AvatarStudio() {
               ? "本番UIプレビュー中"
               : "開発UIプレビュー中"}
           </span>
-          <span>
-            {isProductionUiPreview ? "開発UIに戻る" : "本番UIを確認"}
-          </span>
+          <span>{isProductionUiPreview ? "開発UIに戻る" : "本番UIを確認"}</span>
         </button>
       ) : null}
     </div>

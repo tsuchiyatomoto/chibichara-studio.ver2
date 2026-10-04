@@ -2,6 +2,10 @@
 
 Next.js app for creating chibi avatars and synthesizing Japanese speech.
 
+Movie supports uploading a two-audio-track MP4, utterance-level Japanese analysis,
+Gemini expression analysis, Irodori resynthesis, and mixed MP4 export.
+See [Movie setup](docs/movie-setup.md) and [requirements](docs/movie-requirements.md).
+
 ## Setup
 
 Install dependencies:
@@ -94,6 +98,9 @@ The Voice page can turn generated clips into a reusable
 3. Listen to all five clips and start training. The voice name is internal.
 4. Follow the progress. The completed model automatically replaces the previously
    saved model and is also available to download.
+5. After saving, the page automatically generates all five preview sentences
+   with the trained voice and switches to the post-training audio. Failed
+   sentences can be retried individually using their preview button.
 
 The first generated clip is kept as a private temporary reference, so later samples
 use the same speaker identity. Training runs in Irodori-TTS-Server and temporarily

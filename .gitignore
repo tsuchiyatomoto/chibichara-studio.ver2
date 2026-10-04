@@ -32,6 +32,7 @@ yarn-error.log*
 .pnpm-debug.log*
 /.tts-*.log
 /.dev-server*.log
+/.dev-*.log
 /.diagnostics/
 /public/voice-api-check/
 
@@ -46,3 +47,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+/.movie-data/
+/.movie-venv/
+/.movie-*.log
+**/__pycache__/
+/.pytest_cache/
+/test-results/
+/playwright-report/

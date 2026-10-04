@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/start-next.mjs dev",
     "tts:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-irodori-tts.ps1",
     "tts:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-irodori-tts.ps1",
+    "movie:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-movie.ps1",
+    "movie:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-movie.ps1",
+    "movie:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-movie.ps1",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/start-next.mjs start",
     "lint": "eslint"
   },
   "dependencies": {
@@ -18,6 +21,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
