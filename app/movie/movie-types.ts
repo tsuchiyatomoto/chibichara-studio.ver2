@@ -10,6 +10,8 @@ export type Segment = {
   status: string;
   issue: string | null;
   suggested_text?: string;
+  analysis_failed?: boolean;
+  analysis_issue?: string | null;
   nonverbal?: boolean;
   vocalization?: string;
   fallback_reason?: string;

@@ -167,6 +167,18 @@ def test_short_unexplained_sound_does_not_force_retry(audio_system, monkeypatch)
     assert not segments[0].get("analysis_failed")
 
 
+def test_window_without_vad_is_not_sent_to_audio_model(audio_system, monkeypatch):
+    import faster_whisper.vad
+    path, raw, directory, _ = audio_system
+    monkeypatch.setattr(faster_whisper.vad, "get_speech_timestamps", lambda *args: [])
+    calls = []
+    monkeypatch.setattr(audio_events, "request_events", lambda *args: calls.append(1))
+    segments = audio_events.analyze_events(path, raw, directory, lambda: None, lambda _: None)
+    assert calls == []
+    assert len(segments) == 1 and segments[0]["text"] == raw[0]["text"]
+    assert segments[0]["analysis_failed"]
+
+
 def test_failed_analysis_does_not_restore_old_short_placeholders(audio_system, monkeypatch):
     path, raw, directory, _ = audio_system
     raw.append(dict(start=2.85, end=2.99, text=""))
@@ -216,6 +228,27 @@ def test_invalid_timestamps_and_lexical_laughter_are_rejected():
         audio_events.validate_events(result(laugh), 3)
 
 
+def test_periodic_nonverbal_grid_is_rejected():
+    breaths = []
+    for index in range(8):
+        breath = event(start=.5 + index * .5, end=.7 + index * .5, text="")
+        breath.vocalization = "breath"
+        breaths.append(breath)
+    with pytest.raises(ValueError, match="等間隔"):
+        audio_events.validate_events(result(*breaths), 5)
+
+
+def test_verbal_event_needs_only_acoustic_classification():
+    speech = event()
+    speech.suggested_text = ""
+    audio_events.validate_events(result(speech), 3)
+    groups = audio_events.canonicalize_transcript_events([
+        dict(start=.2, end=1.2, text="", expression=speech),
+    ], [dict(start=.2, end=1.2, text="Whisperの本文")], 3)
+    assert groups[0]["text"] == "Whisperの本文"
+    assert groups[0]["expression"].suggested_text == "Whisperの本文"
+
+
 def test_silent_timestamp_is_flagged_without_rejecting_supported_event():
     reviewed = audio_events.review_acoustic_coverage([
         dict(start=.5, end=.95), dict(start=1.9, end=4.6),
@@ -223,6 +256,23 @@ def test_silent_timestamp_is_flagged_without_rejecting_supported_event():
     assert reviewed[0]["analysis_failed"]
     assert "一致" in reviewed[0]["acoustic_warning"]
     assert not reviewed[1].get("analysis_failed")
+
+
+def test_rejected_nonverbal_event_does_not_hide_vad_gap():
+    reviewed = audio_events.review_acoustic_coverage([
+        dict(start=.5, end=.95, text="", expression=event(start=.5, end=.95, text="")),
+    ], [dict(start=round(.8 * 16000), end=round(1.4 * 16000))])
+    assert reviewed[0]["analysis_failed"]
+    assert any(group.get("coverage_gap") for group in reviewed)
+
+
+def test_failed_nonverbal_event_is_not_canonicalized_as_a_vocalization():
+    laugh = event(start=1, end=1.5, text="")
+    groups = audio_events.canonicalize_transcript_events([
+        dict(start=1, end=1.5, text="", expression=laugh,
+             analysis_failed=True, acoustic_warning="音声検出と不一致"),
+    ], [], 3)
+    assert groups == []
 
 
 @pytest.fixture
@@ -260,10 +310,10 @@ def test_audio_events_replace_asr_merge_and_skip_old_cache(audio_system, monkeyp
     assert len(calls) == 2
 
 
-def test_retry_on_shorter_audio_recovers_separate_events(audio_system, monkeypatch):
+def test_retry_changes_context_without_splitting_the_asr_utterance(audio_system, monkeypatch):
     path, raw, directory, _ = audio_system
     lengths = []
-    def request(client, data, duration, check):
+    def request(client, data, duration, check, diagnostics=None):
         lengths.append(duration)
         if len(lengths) == 1:
             raise audio_events.AudioUnavailable("without audio")
@@ -272,7 +322,7 @@ def test_retry_on_shorter_audio_recovers_separate_events(audio_system, monkeypat
         return result(event(start=.3, end=1.3, text="")), None
     monkeypatch.setattr(audio_events, "request_events", request)
     segments = audio_events.analyze_events(path, raw, directory, lambda: None, lambda _: None)
-    assert lengths == [3, 1.5, 1.5]
+    assert lengths == [3, 2.9]
     assert [s["text"] for s in segments] == [raw[0]["text"]]
 
 
@@ -323,6 +373,59 @@ def test_schema_is_accepted_by_installed_google_sdk():
     assert types.Content(role="user", parts=[types.Part.from_text(text="test")]).role == "user"
 
 
+def test_vad_pause_inside_next_asr_utterance_is_not_a_split_point():
+    provisional = [
+        dict(start=918.182, end=919.57, text="前の発言"),
+        dict(start=920.25, end=921.21, text="コントできる？"),
+    ]
+    vad = [
+        dict(start=round(918.332 * 16000), end=round(918.756 * 16000)),
+        dict(start=round(919.26 * 16000), end=round(920.132 * 16000)),
+        dict(start=round(920.636 * 16000), end=round(921.508 * 16000)),
+    ]
+    protected = audio_events.protected_speech(provisional)
+    assert audio_events.pause_midpoints(vad, 916.432, 922, protected) == []
+    assert audio_events.cut_crosses_speech(920.384, protected)
+    assert audio_events.protect_window_bounds(
+        916.432, 920.384, protected, 930
+    ) == pytest.approx((916.432, 921.36))
+
+
+def test_pause_outside_retry_window_is_not_used_as_a_split_point():
+    vad = [
+        dict(start=round(675.324 * 16000), end=round(676.516 * 16000)),
+        dict(start=round(715.964 * 16000), end=round(719.428 * 16000)),
+    ]
+    assert audio_events.pause_midpoints(vad, 687.808, 727.312) == []
+
+
+def test_failed_request_logs_original_and_trimmed_audio_bounds(audio_system, monkeypatch):
+    import faster_whisper.vad
+    from google import genai
+    from google.genai.errors import ServerError
+    from movie_worker import audio_diagnostics
+    path, raw, directory, _ = audio_system
+    monkeypatch.setattr(faster_whisper.vad, "get_speech_timestamps", lambda *args: [dict(start=16000, end=32000)])
+    def fail(**kwargs):
+        raise ServerError(504, {"error": {"code": 504, "status": "DEADLINE_EXCEEDED", "message": "deadline"}})
+    monkeypatch.setattr(genai, "Client", lambda **kwargs: SimpleNamespace(
+        models=SimpleNamespace(generate_content=fail), close=lambda: None))
+    monkeypatch.setattr(audio_events.time, "sleep", lambda _: None)
+    segments = audio_events.analyze_events(path, raw, directory, lambda: None, lambda _: None)
+    entries = audio_diagnostics.read_recent(directory)["entries"]
+    assert len(entries) == 2
+    initial = next(entry for entry in entries if entry["depth"] == 0)
+    retry = next(entry for entry in entries if entry["depth"] == 1)
+    assert initial["window_start"] == 0 and initial["window_end"] == 3
+    assert initial["audio_start"] == .85 and initial["audio_end"] == 2.15
+    assert initial["attempt"] == 1 and initial["error"]["code"] == 504
+    assert retry["audio_start"] == pytest.approx(.05)
+    assert retry["audio_end"] == pytest.approx(2.95)
+    assert len({(e["audio_start"], e["audio_end"]) for e in entries}) == 2
+    assert len(segments) == 1 and segments[0]["text"] == raw[0]["text"]
+    assert segments[0]["analysis_failed"]
+
+
 def test_verification_retries_refusal_instead_of_reporting_no_laughter(tmp_path, monkeypatch):
     from google import genai
     path = tmp_path / "laugh.wav"
@@ -371,7 +474,8 @@ def test_failed_analysis_recovers_saved_sentence_tail(audio_system, monkeypatch)
     assert segments[0]["end"] == pytest.approx(10.948)
     assert segments[0]["asr_end"] == 10.21
     assert segments[0]["analysis_failed"] and segments[0]["issue"]
-    assert len(aligned) == 1 and aligned[0]["end"] == pytest.approx(10.948)
+    assert len(aligned) == 2  # Initial alignment and one bounded recovery attempt.
+    assert all(s["end"] == pytest.approx(10.948) for s in aligned)
     assert raw[0]["end"] == 10.21  # Retain ASR diagnostics.
 
 
@@ -444,7 +548,8 @@ def test_failed_windows_restore_one_original_sentence_before_alignment(audio_sys
         raise audio_events.AudioUnavailable("without audio")
     monkeypatch.setattr(audio_events, "request_events", request)
     segments = audio_events.analyze_events(path, raw, directory, lambda: None, lambda _: None)
-    assert len(segments) == len(aligned) == 1
+    assert len(segments) == 1 and len(aligned) == 2
+    assert all(s["text"] == text for s in aligned)
     assert (segments[0]["start"], segments[0]["end"], segments[0]["text"]) == (20.48, 30.27, text)
     assert segments[0]["analysis_failed"] and segments[0]["issue"]
     assert segments[0]["id"] == "1"
@@ -483,7 +588,7 @@ def test_fallback_merge_does_not_cross_a_confirmed_event():
 def test_uncovered_sound_does_not_discard_successful_speech(audio_system, monkeypatch):
     path, raw, directory, _ = audio_system
     calls = []
-    def request(client, data, duration, check):
+    def request(client, data, duration, check, diagnostics=None):
         calls.append(duration)
         if duration < 3:
             raise audio_events.AudioUnavailable("without audio")
@@ -518,7 +623,7 @@ def test_missing_complete_utterance_keeps_asr_only_in_its_gap(audio_system, monk
     path, raw, directory, _ = audio_system
     raw[:] = [dict(start=.2, end=1.2, text="こんにちはー"),
               dict(start=1.8, end=2.8, text="次です")]
-    def request(client, data, duration, check):
+    def request(client, data, duration, check, diagnostics=None):
         if duration < 3:
             raise audio_events.AudioUnavailable("without audio")
         return result(event()), None

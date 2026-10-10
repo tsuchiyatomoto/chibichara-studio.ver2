@@ -160,7 +160,8 @@ def unexplained_speech(groups, vad):
             start=start,
             end=end,
             text="",
-            issue="文字にならない発声、または聞き取りが必要な区間です。",
+            issue="音声解析で内容を確認中の区間です。",
+            analysis_issue="pending_audio",
         )
         for start, end in extra
     ]
@@ -269,6 +270,10 @@ def initialize_segments(groups):
                 "発言時刻が重なっています。開始・終了時刻を確認してください。"
             )
         previous = max(previous, seg["end"])
+        unresolved = (
+            seg.get("analysis_issue") == "pending_audio"
+            or (seg.get("analysis_failed") and not seg.get("expression"))
+        )
         seg.update(
             id=str(i + 1),
             reading=seg["text"],
@@ -279,7 +284,7 @@ def initialize_segments(groups):
             status="pending",
             attempts=0,
             revision=0,
-            nonverbal=not bool(seg["text"]),
+            nonverbal=(seg.get("nonverbal", not bool(seg["text"])) and not unresolved),
         )
     return groups
 

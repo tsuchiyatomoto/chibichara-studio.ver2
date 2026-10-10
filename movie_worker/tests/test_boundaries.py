@@ -78,6 +78,23 @@ def test_genuine_unexplained_vocalizations_remain_reviewable():
     assert len(groups) == 1
 
 
+def test_vad_tail_is_pending_until_audio_analysis_classifies_it():
+    transcript = [{
+        "start": 1.62,
+        "end": 4.56,
+        "text": "これから、ワールド・オブ・タンクスを始めたいと思います。",
+    }]
+    groups = transcript + analysis.unexplained_speech(
+        transcript, [speech(1.916, 5.284)]
+    )
+    segments = analysis.initialize_segments(groups)
+    tail = segments[1]
+    assert (tail["start"], tail["end"]) == (4.56, 5.284)
+    assert tail["analysis_issue"] == "pending_audio"
+    assert tail["nonverbal"] is False
+    assert "確認中" in tail["issue"]
+
+
 def test_aligner_sees_syllable_tail_before_unknown_speech_is_created(monkeypatch):
     # ASR recognized the full sentence but ended its time range mid-syllable.
     # This aligner only succeeds if given audio through the actual word ending.

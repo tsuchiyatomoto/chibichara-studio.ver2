@@ -54,7 +54,13 @@ export default function SegmentEditor({
           {stamp(s.start)}–{stamp(s.end)}
         </span>
         <span className="font-bold">
-          {s.text || VOCALIZATIONS[s.vocalization ?? ""] || "文字にならない発声"}
+          {s.text ||
+            VOCALIZATIONS[s.vocalization ?? ""] ||
+            (s.analysis_issue === "pending_audio"
+              ? "音声解析待ち"
+              : s.analysis_failed
+                ? "未判定の発声"
+                : "文字にならない発声")}
         </span>
         <span className="ml-3 text-xs text-slate-500">
           {EMOTIONS[s.emotion]} ·{" "}

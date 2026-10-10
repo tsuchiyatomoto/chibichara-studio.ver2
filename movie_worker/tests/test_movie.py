@@ -69,6 +69,35 @@ def movie(tmp_path):
     return path
 
 
+def test_audio_diagnostics_are_owner_scoped_and_downloadable(system):
+    from movie_worker import audio_diagnostics
+    store, _, client = system
+    job = store.create(OWNER, "diagnostics.mp4", 100)
+    url = f"/jobs/{job['id']}/audio-diagnostics"
+    download = f"/jobs/{job['id']}/files/{audio_diagnostics.LOG_NAME}"
+    assert client.get(url).json() == dict(available=False, entries=[], truncated=False)
+    assert client.get(download).status_code == 404
+    record = '{"request_id":"test","outcome":"failed","error":{"code":504}}\n'
+    (store.directory(job["id"]) / audio_diagnostics.LOG_NAME).write_bytes(record.encode("utf-8"))
+    response = client.get(url)
+    assert response.json()["entries"][0]["error"]["code"] == 504
+    assert response.headers["cache-control"] == "private, no-store"
+    response = client.get(download)
+    assert response.text == record and response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["content-type"] == "application/x-ndjson"
+    with (store.directory(job["id"]) / audio_diagnostics.LOG_NAME).open("ab") as file:
+        file.write(b'{"request_id":')
+    # A download while the worker is writing includes complete records only.
+    response = client.get(download)
+    assert response.text == record
+    assert int(response.headers["content-length"]) == len(response.content)
+    for path in (url, download):
+        assert client.get(path, headers={"X-Movie-Owner": OTHER}).status_code == 404
+        assert client.get(path, headers={"Authorization": "Bearer invalid"}).status_code == 401
+    store.patch(job["id"], state="expired")
+    assert client.get(url).status_code == 404 and client.get(download).status_code == 404
+
+
 def make_segment(ident="1", start=0.5, end=1.5):
     return dict(
         id=ident,
@@ -332,7 +361,8 @@ def test_accepting_exhausted_segment_allows_retry(system):
     store, _, client = system
     job = store.create(OWNER, "retry.mp4", 1)
     segment = make_segment()
-    segment.update(status="review", attempts=3, issue="読みが一致しません")
+    segment.update(status="review", attempts=3, issue="読みが一致しません",
+                   analysis_failed=True, analysis_issue="expression_missing")
     store.patch(job["id"], state="needs_review", media={"duration": 4}, segments=[segment])
     body = {k: segment[k] for k in (
         "revision", "text", "reading", "start", "end", "emotion", "style", "mode")}
@@ -341,6 +371,26 @@ def test_accepting_exhausted_segment_allows_retry(system):
     saved = response.json()["segments"][0]
     assert saved["attempts"] == 0 and saved["status"] == "pending"
     assert saved["issue"] is None and saved["revision"] == 1
+    assert not saved["analysis_failed"] and saved["analysis_issue"] is None
+
+
+def test_source_excerpt_tracks_recovered_revision(system, monkeypatch):
+    store, _, client = system
+    job = store.create(OWNER, "source.mp4", 1)
+    segment = make_segment()
+    store.patch(job["id"], state="needs_review", segments=[segment])
+    intervals = []
+    def excerpt(source, destination, start, end):
+        intervals.append((start, end))
+        destination.write_bytes(b"excerpt")
+    monkeypatch.setattr(media, "excerpt", excerpt)
+    url = f"/jobs/{job['id']}/files/source-1.wav"
+    assert client.get(url).status_code == 200
+    assert client.get(url).status_code == 200
+    segment.update(start=.7, revision=1)
+    store.patch(job["id"], segments=[segment])
+    assert client.get(url).status_code == 200
+    assert intervals == [(.5, 1.5), (.7, 1.5)]
 
 
 def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch):
@@ -387,7 +437,8 @@ def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch)
         lambda source, segments, directory, check, save: save(segments, "fixture"),
     )
     wav = io.BytesIO()
-    sf.write(wav, tone(1), 48000, format="WAV")
+    # The synthesizer may return natural speech longer than the source segment.
+    sf.write(wav, tone(2), 48000, format="WAV")
 
     class Speech:
         status_code = 200
@@ -413,7 +464,9 @@ def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch)
     engine.perform(ident, "analyze")
     assert store.get(ident)["state"] == "preview_ready"
     assert store.get(ident)["segments"][0]["status"] == "done"
-    assert speech_requests[0]["irodori"]["seconds"] == 1
+    assert "seconds" not in speech_requests[0]["irodori"]
+    fitted, rate = sf.read(store.directory(ident) / "seg-1.wav")
+    assert rate == 48000 and len(fitted) == 48000
     assert (
         client.post(f"/jobs/{ident}/convert", json={"confirmed": False}).status_code
         == 400
@@ -454,6 +507,29 @@ def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch)
     assert store.get(ident)["state"] == "completed"
     assert store.get(ident)["segments"][0]["issue"] is None
     assert len(speech_requests) == 2  # Reuse the already generated audio.
+    # A saved analysis warning must recover during Continue, without asking
+    # for row-by-row acceptance or synthesizing the finished neighbor again.
+    from movie_worker import speech_recovery
+    import faster_whisper.vad
+    stopped = store.get(ident)["segments"]
+    stopped[0].update(status="review", issue=speech_recovery.REVIEW_ISSUE,
+                      analysis_failed=True, attempts=0,
+                      aligned_start=.5, aligned_end=1.5, alignment_warning=None)
+    neighbor_audio = (store.directory(ident) / "seg-2.wav").read_bytes()
+    monkeypatch.setattr(faster_whisper.vad, "get_speech_timestamps", lambda *args: [
+        dict(start=8000, end=24000), dict(start=32000, end=48000)])
+    monkeypatch.setattr(speech_recovery, "request_review", lambda data, seg, check, diagnostics=None:
+        speech_recovery.SpeechReview(id=seg["id"], audio_understood=True,
+            content="confirmed", expression_confident=False, emotion="unknown",
+            style="normal", strength=.5, pace="normal", vocalization="none", reason="感情のみ不明"))
+    store.patch(ident, state="needs_review", segments=stopped)
+    assert client.post(f"/jobs/{ident}/convert", json={"confirmed": True}).status_code == 200
+    engine.perform(ident, "convert")
+    recovered = store.get(ident)
+    assert recovered["state"] == "completed"
+    assert recovered["segments"][0]["analysis_resolution"]["method"] == "neutral_expression"
+    assert len(speech_requests) == 3
+    assert (store.directory(ident) / "seg-2.wav").read_bytes() == neighbor_audio
     assert client.delete(f"/jobs/{ident}").status_code == 200
     assert not store.directory(ident).exists()
 

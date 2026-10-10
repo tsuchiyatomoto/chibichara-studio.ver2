@@ -379,6 +379,12 @@ class Engine:
             self.synthesize(ident, chosen, preview=True)
             return
         if task in {"convert", "preview", "regenerate"}:
+            if task == "convert":
+                from .speech_recovery import needs_recovery, recover_segments
+                if any(needs_recovery(s) for s in job["segments"]):
+                    self.progress(ident, "未解決の発言を自動で再確認しています。", state="analyzing")
+                    recover_segments(directory / "analysis.wav", job["segments"], directory, check, report)
+                    self.store.patch(ident, segments=job["segments"])
             ids = (
                 [s["id"] for s in job["segments"]]
                 if task == "convert"
@@ -484,7 +490,8 @@ class Engine:
                     options = dict(
                         ref_embed=job["snapshot_path"],
                         caption=caption,
-                        seconds=max(0.5, seg["end"] - seg["start"]),
+                        # Let the checkpoint allocate enough frames to speak. The
+                        # generated speech is fitted to the exact timeline below.
                         num_steps=40,
                         num_candidates=1,
                         decode_mode="sequential",

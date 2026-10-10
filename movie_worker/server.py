@@ -9,10 +9,10 @@ from contextlib import asynccontextmanager
 import httpx
 import portalocker
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, media
+from . import audio_diagnostics, config, media
 from .pipeline import Engine, tts_get
 from .store import ACTIVE, Store
 
@@ -174,6 +174,15 @@ def job_status(ident: str, oid=Depends(owner)):
     return store.public(store.get(ident, oid))
 
 
+@app.get("/jobs/{ident}/audio-diagnostics")
+def job_audio_diagnostics(ident: str, oid=Depends(owner)):
+    job = store.get(ident, oid)
+    if job["state"] == "expired":
+        raise KeyError(ident)
+    return JSONResponse(audio_diagnostics.read_recent(store.directory(ident)),
+                        headers={"Cache-Control": "private, no-store"})
+
+
 @app.put("/uploads/{ident}")
 async def upload_chunk(ident: str, request: Request, offset: int, oid=Depends(owner)):
     store.get(ident, oid)
@@ -320,6 +329,9 @@ def edit_segment(ident: str, segment_id: str, body: SegmentEdit, oid=Depends(own
                 # Accepting a failed attempt must actually allow another try.
                 # Otherwise range(attempts, 3) stays empty on every conversion.
                 seg.update(status="pending", attempts=0, revision=seg["revision"] + 1)
+        if not same or body.accept:
+            seg.update(analysis_failed=False, analysis_issue=None)
+            seg.pop("analysis_detail", None)
         if body.mode != "tts":
             seg.update(status="accepted", issue=None)
         segments.sort(key=lambda s: s["start"])
@@ -390,7 +402,7 @@ def files(ident: str, name: str, oid=Depends(owner)):
     job = store.get(ident, oid)
     if job["state"] == "expired":
         raise KeyError(ident)
-    allowed = {"input.mp4", "output.mp4", "preview.mp4", "commentary.wav"}
+    allowed = {"input.mp4", "output.mp4", "preview.mp4", "commentary.wav", audio_diagnostics.LOG_NAME}
     allowed.update(
         f"track-{t['index']}.m4a" for t in job.get("media", {}).get("audio", [])
     )
@@ -404,18 +416,30 @@ def files(ident: str, name: str, oid=Depends(owner)):
     ):
         raise KeyError(name)
     path = store.directory(ident) / name
-    if name.startswith("source-") and not path.exists():
-        seg = next(s for s in job["segments"] if name == f"source-{s['id']}.wav")
-        # No writer edits a segment while this clip is being prepared.
+    if name.startswith("source-"):
+        # Recovery can correct a row's bounds without an editor save. Include
+        # its revision so a previously played excerpt cannot remain stale.
         with store.lock:
-            media.excerpt(
-                store.directory(ident) / "commentary-source.wav",
-                path,
-                seg["start"],
-                seg["end"],
-            )
+            job = store.get(ident, oid)
+            seg = next(s for s in job["segments"] if name == f"source-{s['id']}.wav")
+            path = store.directory(ident) / f"source-{seg['id']}-r{seg['revision']}.wav"
+            if not path.exists():
+                media.excerpt(
+                    store.directory(ident) / "commentary-source.wav",
+                    path,
+                    seg["start"],
+                    seg["end"],
+                )
     if not path.is_file():
         raise KeyError(name)
+    if name == audio_diagnostics.LOG_NAME:
+        # Snapshot append-only logs so concurrent writes cannot change Content-Length mid-download.
+        content = path.read_bytes()
+        content = content[:content.rfind(b"\n") + 1]
+        return Response(content, media_type="application/x-ndjson", headers={
+            "Content-Disposition": f'attachment; filename="{audio_diagnostics.LOG_NAME}"',
+            "Cache-Control": "private, no-store",
+        })
     filename = "converted.mp4" if name == "output.mp4" else name
     return FileResponse(
         path,

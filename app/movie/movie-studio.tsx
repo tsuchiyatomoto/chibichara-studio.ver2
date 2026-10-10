@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import SegmentEditor from "./segment-editor";
+import AudioDiagnostics from "./audio-diagnostics";
 import {
   Job,
   Health,
@@ -371,6 +372,7 @@ export default function MovieStudio() {
                 </p>
               )}
             </div>
+            <AudioDiagnostics key={job.id} job={job} />
             {job.state === "ready" && job.media && (
               <div className="space-y-5">
                 <div className="grid gap-6 md:grid-cols-2">
