@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 from contextlib import asynccontextmanager
 
 import httpx
@@ -88,13 +89,15 @@ class Upload(Body):
 
 
 class Analyze(Body):
-    game_index: int
-    voice_index: int
+    # Accepted for compatibility with workers and browser tabs started before
+    # tracks were fixed. The endpoint always uses the first two audio streams.
+    game_index: int | None = None
+    voice_index: int | None = None
     glossary: str = Field(default="", max_length=2000)
 
 
 class Convert(Body):
-    confirmed: bool
+    confirmed: bool = True
     game_gain: float = Field(default=1, ge=0, le=2)
     voice_gain: float = Field(default=1, ge=0, le=2)
 
@@ -109,6 +112,25 @@ class SegmentEdit(Body):
     style: str
     mode: str
     accept: bool = False
+
+
+class AvatarPlacement(Body):
+    x: float = Field(ge=-3, le=4)
+    y: float = Field(ge=-3, le=4)
+    scale: float = Field(ge=0.05, le=3)
+    rotation: float = Field(ge=-180, le=180)
+    flip_x: bool = False
+
+
+class AvatarPose(Body):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[a-zA-Z0-9_-]+$")
+    label: str = Field(min_length=1, max_length=100)
+    frames: tuple[str, str, str, str]
+
+
+class AvatarBody(Body):
+    placement: AvatarPlacement
+    poses: list[AvatarPose] = Field(min_length=1, max_length=3)
 
 
 def idle(job):
@@ -228,6 +250,66 @@ def complete_upload(ident: str, oid=Depends(owner)):
     return store.public(store.get(ident, oid))
 
 
+@app.put("/jobs/{ident}/avatar-assets/{name}")
+async def upload_avatar_asset(
+    ident: str, name: str, request: Request, oid=Depends(owner)
+):
+    job = store.get(ident, oid)
+    idle(job)
+    if job["state"] != "ready":
+        raise HTTPException(409, "アバターは動画の確認中に設定してください。")
+    if not re.fullmatch(r"avatar-[0-2]-[0-3]\.png", name):
+        raise ValueError("アバター画像の名前が不正です。")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip() != "image/png":
+        raise HTTPException(415, "PNG画像を送信してください。")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > 12 * 1024**2:
+            raise HTTPException(413, "アバター画像が大きすぎます。")
+        data.extend(chunk)
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError("正しいPNG画像を送信してください。")
+    width, height = struct.unpack(">II", data[16:24])
+    if not 1 <= width <= 4096 or not 1 <= height <= 4096:
+        raise ValueError("アバター画像は4096px以下にしてください。")
+    target = store.directory(ident) / name
+    temporary = target.with_suffix(".part")
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
+    return {"name": name, "width": width, "height": height}
+
+
+@app.post("/jobs/{ident}/avatar")
+def configure_avatar(ident: str, body: AvatarBody, oid=Depends(owner)):
+    with store.lock:
+        job = store.get(ident, oid)
+        idle(job)
+        if job["state"] != "ready":
+            raise HTTPException(409, "アバターは動画の確認中に設定してください。")
+        referenced = [name for pose in body.poses for name in pose.frames]
+        if len(set(referenced)) != len(referenced) or any(
+            not re.fullmatch(r"avatar-[0-2]-[0-3]\.png", name)
+            for name in referenced
+        ):
+            raise ValueError("アバター画像の構成が不正です。")
+        directory = store.directory(ident)
+        if any(not (directory / name).is_file() for name in referenced):
+            raise ValueError("アバター画像が不足しています。")
+        digest = hashlib.sha256(ident.encode("ascii"))
+        for name in referenced:
+            digest.update(name.encode("ascii"))
+            digest.update((directory / name).read_bytes())
+        avatar = body.model_dump()
+        avatar["seed"] = int.from_bytes(digest.digest()[:4], "big")
+        for path in directory.glob("avatar-*.png"):
+            if path.name not in referenced:
+                path.unlink(missing_ok=True)
+        for name in ("avatar-animation.json", "avatar.ffconcat", "avatar-scale.cmd", "output.mp4", "preview.mp4"):
+            (directory / name).unlink(missing_ok=True)
+        store.patch(ident, avatar=avatar)
+    return store.public(store.get(ident, oid))
+
+
 @app.post("/jobs/{ident}/analyze")
 def analyze(ident: str, body: Analyze, oid=Depends(owner)):
     with store.lock:
@@ -238,21 +320,14 @@ def analyze(ident: str, body: Analyze, oid=Depends(owner)):
                 409,
                 "解析は入力確認後に開始してください。失敗した場合は再開を使用してください。",
             )
-        tracks = {a["index"] for a in job["media"]["audio"]}
-        if (
-            body.game_index not in tracks
-            or body.voice_index not in tracks
-            or body.game_index == body.voice_index
-        ):
-            raise ValueError("ゲーム音と実況には異なる音声トラックを指定してください。")
         if not config.gemini_configured():
             raise ValueError("Geminiのプロジェクト・認証ファイルを確認してください。")
         if shutil.disk_usage(config.DATA).free < job["size"] + 2 * 1024**3:
             raise HTTPException(507, "変換用の空き容量が不足しています。")
         store.patch(
             ident,
-            game_index=body.game_index,
-            voice_index=body.voice_index,
+            game_index=job["media"]["audio"][0]["index"],
+            voice_index=job["media"]["audio"][1]["index"],
             glossary=body.glossary,
         )
         engine.queue(ident, "analyze")
@@ -266,12 +341,11 @@ def convert(ident: str, body: Convert, oid=Depends(owner)):
         idle(job)
         if not job.get("analyzed") or not job.get("snapshot_path"):
             raise ValueError("先に解析と試聴を行ってください。")
-        if not body.confirmed or not any(
-            s["status"] == "done" for s in job["segments"]
-        ):
-            raise ValueError("生成された声を試聴して、音質を確認してください。")
         store.patch(
-            ident, confirmed=True, game_gain=body.game_gain, voice_gain=body.voice_gain
+            ident,
+            confirmed=True,
+            game_gain=body.game_gain,
+            voice_gain=body.voice_gain,
         )
         engine.queue(ident, "convert")
     return store.public(store.get(ident, oid))
@@ -339,8 +413,8 @@ def edit_segment(ident: str, segment_id: str, body: SegmentEdit, oid=Depends(own
         store.patch(
             ident,
             segments=segments,
-            state="needs_review",
-            message="発言を更新しました。必要に応じて再生成し、全体変換を続行してください。",
+            state="preview_ready",
+            message="発言を更新しました。全体変換へ進めます。",
         )
     return store.public(store.get(ident, oid))
 
@@ -410,6 +484,11 @@ def files(ident: str, name: str, oid=Depends(owner)):
         f"seg-{s['id']}.wav" for s in job["segments"] if s["status"] == "done"
     )
     allowed.update(f"source-{s['id']}.wav" for s in job["segments"])
+    allowed.update(
+        frame
+        for pose in job.get("avatar", {}).get("poses", [])
+        for frame in pose.get("frames", [])
+    )
     if name not in allowed or (
         name in {"output.mp4", "preview.mp4", "commentary.wav"}
         and job["state"] != "completed"

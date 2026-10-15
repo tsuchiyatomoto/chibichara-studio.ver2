@@ -1,10 +1,13 @@
 import hashlib
 import io
+import base64
+import json
 
 import numpy as np
 import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 from safetensors.numpy import save
 
 from movie_worker import analysis, media, pipeline, server
@@ -12,6 +15,9 @@ from movie_worker.store import Store
 
 OWNER = "anon_" + "a" * 32
 OTHER = "anon_" + "b" * 32
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7y8AAAAASUVORK5CYII="
+)
 
 
 def tone(seconds, frequency=220, sr=48000):
@@ -221,6 +227,39 @@ def test_upload_resume_auth_and_mismatched_retry(system):
     assert client.post(f"/jobs/{ident}/resume").status_code == 200
 
 
+def test_avatar_assets_and_configuration_are_job_scoped(system):
+    store, _, client = system
+    job = store.create(OWNER, "avatar.mp4", 100)
+    store.patch(job["id"], state="ready")
+    root = f"/jobs/{job['id']}"
+    assert client.put(
+        root + "/avatar-assets/avatar-0-0.png",
+        content=b"not png",
+        headers={"Content-Type": "image/png"},
+    ).status_code == 400
+    frames = []
+    for index in range(4):
+        name = f"avatar-0-{index}.png"
+        frames.append(name)
+        assert client.put(
+            root + f"/avatar-assets/{name}",
+            content=PNG,
+            headers={"Content-Type": "image/png"},
+        ).status_code == 200
+    payload = {
+        "placement": {"x": 1.15, "y": 0.8, "scale": 0.5, "rotation": -12, "flip_x": True},
+        "poses": [{"id": "basic", "label": "基本", "frames": frames}],
+    }
+    response = client.post(root + "/avatar", json=payload)
+    assert response.status_code == 200
+    avatar = response.json()["avatar"]
+    assert avatar["placement"]["x"] == 1.15 and isinstance(avatar["seed"], int)
+    assert client.get(root + f"/files/{frames[0]}").content == PNG
+    assert client.get(
+        root + f"/files/{frames[0]}", headers={"X-Movie-Owner": OTHER}
+    ).status_code == 404
+
+
 def test_no_cumulative_drift_and_output_mix(movie, tmp_path):
     directory = tmp_path / "render"
     directory.mkdir()
@@ -250,6 +289,153 @@ def test_no_cumulative_drift_and_output_mix(movie, tmp_path):
     assert spectrum[880] < min(spectrum[220], spectrum[440]) * 0.05
 
 
+def test_avatar_is_lip_synced_and_baked_into_h264_output(movie, tmp_path):
+    directory = tmp_path / "avatar-render"
+    directory.mkdir()
+    (directory / "input.mp4").write_bytes(movie.read_bytes())
+    info = media.inspect(movie)
+    media.extract(movie, directory / "game.wav", 1, info["origin"], 4, lambda: None)
+    media.extract(
+        movie, directory / "commentary-source.wav", 2, info["origin"], 4, lambda: None
+    )
+    segment = make_segment("1", 0.5, 1.5)
+    segment["status"] = "done"
+    sf.write(directory / "seg-1.wav", tone(1), 48000)
+    media.ffmpeg([
+        "-f", "lavfi", "-i", "color=c=red@0.8:s=64x64",
+        "-frames:v", "1", "-vf", "format=rgba", directory / "avatar-source.png",
+    ])
+    avatar_png = (directory / "avatar-source.png").read_bytes()
+    frames = []
+    for index in range(4):
+        name = f"avatar-0-{index}.png"
+        frames.append(name)
+        (directory / name).write_bytes(avatar_png)
+    job = {
+        "media": info,
+        "segments": [segment],
+        "game_gain": 1,
+        "voice_gain": 1,
+        "avatar": {
+            "seed": 123,
+            "placement": {"x": 0.5, "y": 0.5, "scale": 0.5, "rotation": 8, "flip_x": True},
+            "poses": [{"id": "basic", "label": "基本", "frames": frames}],
+        },
+    }
+    media.mix(job, directory, lambda: None)
+    output = media.probe(directory / "output.mp4")
+    video = next(stream for stream in output["streams"] if stream["codec_type"] == "video")
+    assert video["codec_name"] == "h264"
+    animation = json.loads((directory / "avatar-animation.json").read_text(encoding="utf-8"))
+    assert any(event["frame"] in {1, 3} for event in animation["events"])
+    assert any(event["frame"] in {0, 2} for event in animation["events"])
+
+
+@pytest.mark.parametrize("pose_count", [1, 3])
+def test_avatar_changes_pose_only_on_speech_after_two_seconds_of_silence(tmp_path, pose_count):
+    duration = 25
+    samples = np.zeros(duration * 48000, dtype="float32")
+    # Leading silence, long speech, a short pause, an exact two-second pause,
+    # another short pause, a longer pause, and trailing silence.
+    for start, end in [(3, 12), (13.9, 14.9), (16.9, 17.9), (18, 19), (22, 23)]:
+        samples[round(start * 48000):round(end * 48000)] = tone(end - start)
+    commentary = tmp_path / "commentary.wav"
+    sf.write(commentary, samples, 48000)
+    job = {
+        "media": {"duration": duration},
+        "avatar": {
+            "seed": 123,
+            "poses": [
+                {"frames": [f"avatar-{pose}-{frame}.png" for frame in range(4)]}
+                for pose in range(pose_count)
+            ],
+        },
+    }
+    media.avatar_animation(job, tmp_path, commentary, lambda: None)
+    result = (tmp_path / "avatar-animation.json").read_text(encoding="utf-8")
+    animation = json.loads(result)
+    events = animation["events"]
+    changes = [
+        event["start"] for previous, event in zip(events, events[1:])
+        if event["pose"] != previous["pose"]
+    ]
+    assert changes == ([16.9, 22.0] if pose_count > 1 else [])
+    assert animation["pose_silence_seconds"] == 2.0
+    assert animation["scale_events"] == [{"start": 16.9}, {"start": 22.0}]
+    assert animation["scale_duration"] == 0.3
+    assert animation["scale_peak"] == 1.1
+    media.avatar_animation(job, tmp_path, commentary, lambda: None)
+    assert (tmp_path / "avatar-animation.json").read_text(encoding="utf-8") == result
+
+
+def test_silent_avatar_never_changes_pose_or_opens_mouth(tmp_path):
+    commentary = tmp_path / "commentary.wav"
+    sf.write(commentary, np.zeros(12 * 48000, dtype="float32"), 48000)
+    job = {
+        "media": {"duration": 12},
+        "avatar": {"seed": 123, "poses": [
+            {"frames": [f"avatar-{pose}-{frame}.png" for frame in range(4)]}
+            for pose in range(3)
+        ]},
+    }
+    media.avatar_animation(job, tmp_path, commentary, lambda: None)
+    animation = json.loads((tmp_path / "avatar-animation.json").read_text(encoding="utf-8"))
+    events = animation["events"]
+    assert len({event["pose"] for event in events}) == 1
+    assert all(event["frame"] in {0, 2} for event in events)
+    assert animation["scale_events"] == []
+
+
+@pytest.mark.parametrize("rotation,flip_x", [(0, False), (20, True)])
+def test_avatar_scale_pulse_is_baked_into_video_and_keeps_its_center(movie, tmp_path, rotation, flip_x):
+    directory = tmp_path / "avatar render's"
+    directory.mkdir()
+    media.ffmpeg([
+        "-i", movie, "-map", "0", "-vf", "scale=320:180,fps=30",
+        "-c:v", "libx264", "-c:a", "copy", directory / "input.mp4",
+    ])
+    info = media.inspect(directory / "input.mp4")
+    media.extract(directory / "input.mp4", directory / "game.wav", 1, info["origin"], 4, lambda: None)
+    media.extract(directory / "input.mp4", directory / "commentary-source.wav", 2, info["origin"], 4, lambda: None)
+    segments = [make_segment("1", 0.2, 0.4), make_segment("2", 2.4, 3.4)]
+    for segment in segments:
+        segment["status"] = "done"
+        sf.write(directory / f"seg-{segment['id']}.wav", tone(segment["end"] - segment["start"]), 48000)
+    sprite = Image.new("RGBA", (64, 80))
+    ImageDraw.Draw(sprite).rectangle((8, 8, 55, 71), fill=(255, 0, 0, 255))
+    frames = [f"avatar-0-{frame}.png" for frame in range(4)]
+    for name in frames:
+        sprite.save(directory / name)
+    job = {
+        "media": info, "segments": segments, "game_gain": 1, "voice_gain": 1,
+        "avatar": {
+            "seed": 123,
+            "placement": {"x": 0.5, "y": 0.5, "scale": 0.5, "rotation": rotation, "flip_x": flip_x},
+            "poses": [{"id": "basic", "label": "基本", "frames": frames}],
+        },
+    }
+    media.mix(job, directory, lambda: None)
+    decoded = media.run([
+        "ffmpeg", "-v", "error", "-i", directory / "output.mp4",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ])
+    video = np.frombuffer(decoded, dtype=np.uint8).reshape(-1, 180, 320, 3)
+    assert len(video) == 120
+    bounds = []
+    for frame in video:
+        red = (frame[:, :, 0] > 150) & (frame[:, :, 1] < 80) & (frame[:, :, 2] < 80)
+        y, x = np.where(red)
+        bounds.append((x.max() - x.min() + 1, y.max() - y.min() + 1, (x.min() + x.max()) / 2, (y.min() + y.max()) / 2))
+    baseline = np.array(bounds[60])
+    peak = np.array(bounds[75])  # 2.5s: 0.1s after speech resumes at 2.4s.
+    assert np.all(peak[:2] > baseline[:2] * 1.07)
+    assert np.all(peak[:2] < baseline[:2] * 1.14)
+    assert np.all(np.abs(peak[2:] - baseline[2:]) <= 1)
+    # No pulse on the first utterance, before resuming, or after returning.
+    for index in [6, 9, 12, 71, 72, 81, 90, 119]:
+        assert np.all(np.abs(np.array(bounds[index]) - baseline) <= 1)
+
+
 def test_legacy_original_mode_is_silent_in_export(tmp_path):
     directory = tmp_path / "render"
     directory.mkdir()
@@ -261,6 +447,25 @@ def test_legacy_original_mode_is_silent_in_export(tmp_path):
     assert rate == 48000
     assert len(rendered) == 48000
     assert np.max(np.abs(rendered)) == 0
+
+
+def test_muted_overlapping_row_does_not_stop_timeline(tmp_path):
+    directory = tmp_path / "overlap"
+    directory.mkdir()
+    sf.write(directory / "commentary-source.wav", tone(2), 48000)
+    spoken = make_segment("1", 0, 1)
+    muted = make_segment("2", .5, 1.5)
+    muted["mode"] = "mute"
+    sf.write(directory / "seg-1.wav", tone(1), 48000)
+    media.timeline(
+        {"media": {"duration": 2}, "segments": [spoken, muted]},
+        directory,
+        lambda: None,
+    )
+    rendered, rate = sf.read(directory / "commentary.wav")
+    assert rate == 48000 and len(rendered) == 2 * 48000
+    assert np.max(np.abs(rendered[:48000])) > 0
+    assert np.max(np.abs(rendered[48000:])) == 0
 
 
 @pytest.mark.parametrize("source_seconds,target_seconds", [(2, 0.5), (0.5, 2)])
@@ -304,14 +509,56 @@ def test_recognized_laughter_resolves_untranscribed_speech_issue():
     assert segment["vocalization"] == "laugh"
 
 
-def test_failed_pure_laughter_falls_back_to_silence_never_original():
+@pytest.mark.parametrize("changes", [
+    dict(text="", reading="", nonverbal=True, vocalization="laugh"),
+    dict(text="通常の台詞", reading="通常の台詞", nonverbal=False, vocalization="none"),
+])
+def test_failed_utterance_falls_back_to_silence_never_original(changes):
     segment = make_segment()
-    segment.update(text="", reading="", nonverbal=True, vocalization="laugh")
-    pipeline.settle_synthesis_failure(segment, "笑い声を生成できませんでした。", "laugh")
+    segment.update(**changes)
+    pipeline.settle_synthesis_failure(segment, "音声を生成できませんでした。", segment["vocalization"])
     assert segment["mode"] == "mute"
     assert segment["status"] == "accepted"
     assert segment["issue"] is None
+    assert segment["analysis_resolution"]["method"] == "synthesis_failure"
     assert "original" not in segment.values()
+
+
+def test_review_rows_are_automatically_silenced_with_the_reason_preserved():
+    segment = make_segment()
+    segment.update(status="review", issue="発言時刻を確認してください。",
+                   analysis_issue="timing")
+    pipeline.silence_review_segments([segment])
+    assert segment["mode"] == "mute" and segment["status"] == "accepted"
+    assert segment["issue"] is None
+    assert segment["fallback_reason"] == "発言時刻を確認してください。"
+    assert segment["analysis_resolution"] == {
+        "method": "automatic_silence",
+        "previous_issue": "発言時刻を確認してください。",
+    }
+    failed_without_message = make_segment("2")
+    failed_without_message["analysis_failed"] = True
+    pipeline.silence_review_segments([failed_without_message])
+    assert failed_without_message["mode"] == "mute"
+    assert "安全に処理できなかった" in failed_without_message["fallback_reason"]
+
+
+def test_all_muted_job_can_continue_without_confirmation(system):
+    store, _, client = system
+    job = store.create(OWNER, "silent.mp4", 1)
+    segment = make_segment()
+    segment.update(mode="mute", status="accepted")
+    store.patch(
+        job["id"],
+        state="preview_ready",
+        analyzed=True,
+        snapshot_path="saved-voice",
+        segments=[segment],
+    )
+    response = client.post(f"/jobs/{job['id']}/convert", json={"confirmed": False})
+    assert response.status_code == 200
+    assert response.json()["state"] == "queued"
+    assert response.json()["confirmed"] is True
 
 
 def test_recognized_laughter_can_be_saved_without_reading(system):
@@ -457,26 +704,21 @@ def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch)
     assert (
         client.post(
             f"/jobs/{ident}/analyze",
-            json={"game_index": 1, "voice_index": 2},
+            # Legacy values are accepted but cannot reverse the fixed tracks.
+            json={"game_index": 2, "voice_index": 1},
         ).status_code
         == 200
     )
+    assert store.get(ident)["game_index"] == 1
+    assert store.get(ident)["voice_index"] == 2
     engine.perform(ident, "analyze")
-    assert store.get(ident)["state"] == "preview_ready"
+    assert store.get(ident)["state"] == "completed"
+    assert store.get(ident)["confirmed"] is True
+    assert store.get(ident)["preview_ids"] == []
     assert store.get(ident)["segments"][0]["status"] == "done"
     assert "seconds" not in speech_requests[0]["irodori"]
     fitted, rate = sf.read(store.directory(ident) / "seg-1.wav")
     assert rate == 48000 and len(fitted) == 48000
-    assert (
-        client.post(f"/jobs/{ident}/convert", json={"confirmed": False}).status_code
-        == 400
-    )
-    assert (
-        client.post(f"/jobs/{ident}/convert", json={"confirmed": True}).status_code
-        == 200
-    )
-    engine.perform(ident, "convert")
-    assert store.get(ident)["state"] == "completed"
     assert speech_requests[0]["input"] == "テストです。"
     assert len(speech_requests) == 2
     assert "error_rate" not in store.get(ident)["segments"][0]["quality"]
@@ -507,28 +749,22 @@ def test_full_pipeline_with_ai_stubs_and_real_ffmpeg(system, movie, monkeypatch)
     assert store.get(ident)["state"] == "completed"
     assert store.get(ident)["segments"][0]["issue"] is None
     assert len(speech_requests) == 2  # Reuse the already generated audio.
-    # A saved analysis warning must recover during Continue, without asking
-    # for row-by-row acceptance or synthesizing the finished neighbor again.
+    # A saved analysis warning from an older job is silenced during Continue,
+    # without asking for row-by-row acceptance or touching its finished neighbor.
     from movie_worker import speech_recovery
-    import faster_whisper.vad
     stopped = store.get(ident)["segments"]
     stopped[0].update(status="review", issue=speech_recovery.REVIEW_ISSUE,
                       analysis_failed=True, attempts=0,
                       aligned_start=.5, aligned_end=1.5, alignment_warning=None)
     neighbor_audio = (store.directory(ident) / "seg-2.wav").read_bytes()
-    monkeypatch.setattr(faster_whisper.vad, "get_speech_timestamps", lambda *args: [
-        dict(start=8000, end=24000), dict(start=32000, end=48000)])
-    monkeypatch.setattr(speech_recovery, "request_review", lambda data, seg, check, diagnostics=None:
-        speech_recovery.SpeechReview(id=seg["id"], audio_understood=True,
-            content="confirmed", expression_confident=False, emotion="unknown",
-            style="normal", strength=.5, pace="normal", vocalization="none", reason="感情のみ不明"))
     store.patch(ident, state="needs_review", segments=stopped)
     assert client.post(f"/jobs/{ident}/convert", json={"confirmed": True}).status_code == 200
     engine.perform(ident, "convert")
     recovered = store.get(ident)
     assert recovered["state"] == "completed"
-    assert recovered["segments"][0]["analysis_resolution"]["method"] == "neutral_expression"
-    assert len(speech_requests) == 3
+    assert recovered["segments"][0]["mode"] == "mute"
+    assert recovered["segments"][0]["analysis_resolution"]["method"] == "automatic_silence"
+    assert len(speech_requests) == 2
     assert (store.directory(ident) / "seg-2.wav").read_bytes() == neighbor_audio
     assert client.delete(f"/jobs/{ident}").status_code == 200
     assert not store.directory(ident).exists()

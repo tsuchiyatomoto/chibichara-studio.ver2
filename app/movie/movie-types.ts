@@ -17,6 +17,23 @@ export type Segment = {
   fallback_reason?: string;
   revision: number;
 };
+export type AvatarPlacement = {
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+  flip_x: boolean;
+};
+export type MovieAvatarPose = {
+  id: string;
+  label: string;
+  frames: [string, string, string, string];
+};
+export type MovieAvatar = {
+  placement: AvatarPlacement;
+  poses: MovieAvatarPose[];
+  seed?: number;
+};
 export type Job = {
   id: string;
   name: string;
@@ -42,6 +59,7 @@ export type Job = {
     audio: { index: number; title: string; channels: number }[];
   };
   voice?: { hash: string };
+  avatar?: MovieAvatar;
 };
 export type Health = {
   voice_available: boolean;
@@ -63,11 +81,11 @@ export const STATES: Record<string, string> = {
   uploading: "アップロード",
   queued: "順番待ち",
   validating: "動画を確認中",
-  ready: "トラック確認",
+  ready: "解析準備完了",
   analyzing: "発言を解析中",
   synthesizing: "声を生成中",
-  preview_ready: "試聴できます",
-  needs_review: "発言を確認",
+  preview_ready: "変換を開始中",
+  needs_review: "旧ジョブを自動処理",
   mixing: "MP4を書き出し中",
   completed: "完成",
   failed: "処理を停止",
@@ -128,11 +146,19 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const error = data && typeof data === "object" ? data : {};
+    const validation = "detail" in error && Array.isArray(error.detail)
+      ? error.detail
+        .map((item) => item && typeof item === "object" && "msg" in item ? String(item.msg) : "")
+        .filter(Boolean)
+        .join(" / ")
+      : "";
     throw new Error(
       "error" in error && typeof error.error === "string"
         ? error.error
         : "detail" in error && typeof error.detail === "string"
           ? error.detail
+          : validation
+            ? `入力内容を確認してください: ${validation}`
           : "処理に失敗しました。入力内容とサーバーの状態を確認してください。",
     );
   }

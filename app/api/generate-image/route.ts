@@ -1,15 +1,21 @@
 import { ApiError, GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { statSync } from "node:fs";
 import OpenAI, { APIConnectionTimeoutError, toFile } from "openai";
+import { ensureToonOutReady, removeBackground, ToonOutError } from "./toonout";
+import { withVertexImageRetries } from "./vertex-retry";
 
 export const runtime = "nodejs";
 
 const VERTEX_MODEL_ID =
   process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image";
-const OPENAI_MODEL_ID = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-2";
+const PRODUCTION_OPENAI_MODEL_ID = "gpt-image-2.5-sunburst";
+const OPENAI_MODEL_ID =
+  process.env.NODE_ENV === "development"
+    ? process.env.OPENAI_IMAGE_MODEL ?? PRODUCTION_OPENAI_MODEL_ID
+    : PRODUCTION_OPENAI_MODEL_ID;
 const LOCATION = process.env.GOOGLE_CLOUD_LOCATION ?? "global";
 const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
-const VERTEX_RETRY_ATTEMPTS = 6;
+const VERTEX_TIMEOUT_MS = 120000;
 const MAX_PROMPT_LENGTH = 2000;
 const MAX_REFERENCE_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -134,6 +140,30 @@ function findFirstImage(response: GenerateContentLike): InlineImage | undefined 
   }
 }
 
+async function transparentResponse(
+  source: InlineImage,
+  model: string,
+  provider: ImageProvider,
+) {
+  try {
+    const transparent = await removeBackground(source.data, source.mimeType);
+    return Response.json({
+      image: `data:image/png;base64,${transparent}`,
+      sourceImage: `data:${source.mimeType};base64,${source.data}`,
+      mimeType: "image/png",
+      model,
+      provider,
+      backgroundRemovalModel: "joelseytre/toonout",
+    });
+  } catch (error) {
+    console.error("ToonOut background removal failed:", error);
+    return jsonError(
+      error instanceof ToonOutError ? error.message : "ToonOut background removal failed.",
+      503,
+    );
+  }
+}
+
 export async function POST(request: Request) {
   let body: RequestBody;
 
@@ -176,14 +206,24 @@ export async function POST(request: Request) {
     );
   }
 
+  try {
+    await ensureToonOutReady();
+  } catch (error) {
+    return jsonError(
+      error instanceof ToonOutError ? error.message : "ToonOut is unavailable.",
+      503,
+    );
+  }
+
+  // Production always uses OpenAI, including requests from older clients.
   const provider: ImageProvider =
-    process.env.NODE_ENV === "development" && body.provider === "openai"
-      ? "openai"
-      : "vertex";
+    process.env.NODE_ENV === "development" && body.provider !== "openai"
+      ? "vertex"
+      : "openai";
 
   if (provider === "openai") {
     if (!process.env.OPENAI_API_KEY) {
-      return jsonError("Set OPENAI_API_KEY in .env.local.", 500);
+      return jsonError("Set OPENAI_API_KEY in .env.local or the runtime environment.", 500);
     }
 
     const openai = new OpenAI({
@@ -248,18 +288,17 @@ export async function POST(request: Request) {
         );
       }
 
-      return Response.json({
-        image: `data:image/png;base64,${imageData}`,
-        mimeType: "image/png",
-        model: OPENAI_MODEL_ID,
+      return await transparentResponse(
+        { data: imageData, mimeType: "image/png" },
+        OPENAI_MODEL_ID,
         provider,
-      });
+      );
     } catch (error) {
       console.error("OpenAI image generation failed:", error);
 
       if (error instanceof APIConnectionTimeoutError) {
         return jsonError(
-          "GPT Image 2 generation timed out. Please try again.",
+          "OpenAI image generation timed out. Please try again.",
           504,
           process.env.NODE_ENV === "development"
             ? `The request exceeded ${OPENAI_TIMEOUT_MS / 1000} seconds.`
@@ -295,41 +334,44 @@ export async function POST(request: Request) {
     project: process.env.GOOGLE_CLOUD_PROJECT,
     location: LOCATION,
     httpOptions: {
-      timeout: 120000,
-      retryOptions: {
-        attempts: VERTEX_RETRY_ATTEMPTS,
-      },
+      timeout: VERTEX_TIMEOUT_MS,
+      // SDK retries discard error response bodies. Retry after logging instead.
     },
   });
+  const vertexSignal = AbortSignal.timeout(VERTEX_TIMEOUT_MS);
 
   try {
-    const response = await ai.models.generateContent({
-      model: VERTEX_MODEL_ID,
-      contents: referenceImage
-        ? [
-            {
-              role: "user",
-              parts: [
-                { inlineData: referenceImage },
-                ...(secondaryReferenceImage
-                  ? [{ inlineData: secondaryReferenceImage }]
-                  : []),
-                { text: prompt },
-              ],
-            },
-          ]
-        : prompt,
-      config: {
-        responseModalities: [Modality.IMAGE],
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.MINIMAL,
+    const response = await withVertexImageRetries(
+      () => ai.models.generateContent({
+        model: VERTEX_MODEL_ID,
+        contents: referenceImage
+          ? [
+              {
+                role: "user",
+                parts: [
+                  { inlineData: referenceImage },
+                  ...(secondaryReferenceImage
+                    ? [{ inlineData: secondaryReferenceImage }]
+                    : []),
+                  { text: prompt },
+                ],
+              },
+            ]
+          : prompt,
+        config: {
+          abortSignal: vertexSignal,
+          responseModalities: [Modality.IMAGE],
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.MINIMAL,
+          },
+          imageConfig: {
+            aspectRatio: "1:1",
+            imageSize: "512",
+          },
         },
-        imageConfig: {
-          aspectRatio: "1:1",
-          imageSize: "512",
-        },
-      },
-    });
+      }),
+      { model: VERTEX_MODEL_ID, location: LOCATION, signal: vertexSignal },
+    );
 
     const image = findFirstImage(response);
 
@@ -346,12 +388,7 @@ export async function POST(request: Request) {
       );
     }
 
-    return Response.json({
-      image: `data:${image.mimeType};base64,${image.data}`,
-      mimeType: image.mimeType,
-      model: VERTEX_MODEL_ID,
-      provider,
-    });
+    return await transparentResponse(image, VERTEX_MODEL_ID, provider);
   } catch (error) {
     console.error("Vertex AI image generation failed:", error);
 

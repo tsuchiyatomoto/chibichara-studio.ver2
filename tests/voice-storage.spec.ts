@@ -91,7 +91,7 @@ for (const partial of [false, true]) {
     await page.getByRole("button", { name: "学習前の声", exact: true }).click();
     expect(await audioBytes(page, "学習前の声 1を再生")).toBe("voice-bytes-1");
     page.once("dialog", (dialog) => dialog.accept());
-    await page.getByRole("button", { name: "ボイスをすべて削除", exact: true }).click();
+    await page.getByRole("button", { name: "ボイスモデルを削除", exact: true }).click();
     await expect.poll(() => storedCounts(page)).toEqual([0, 0]);
     await page.reload();
     await expect(page.getByRole("button", { name: "声を生成（5本）", exact: true })).toBeEnabled();

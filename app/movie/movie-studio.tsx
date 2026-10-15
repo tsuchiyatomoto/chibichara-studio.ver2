@@ -1,52 +1,82 @@
 "use client";
-import Image from "next/image";
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import SegmentEditor from "./segment-editor";
-import AudioDiagnostics from "./audio-diagnostics";
+import { loadAvatarSession } from "../avatar/avatar-storage";
+import MoviePlayer from "./movie-player";
 import {
-  Job,
-  Health,
   ACTIVE,
-  STATES,
-  field,
-  button,
-  secondary,
-  stamp,
-  fileUrl,
   api,
+  fileUrl,
   post,
+  type AvatarPlacement,
+  type Job,
+  type Health,
+  type MovieAvatarPose,
 } from "./movie-types";
+import { DEFAULT_PLACEMENT } from "./movie-avatar-overlay";
+
+type StoredAvatarImages = {
+  version: 1;
+  avatarPoses: Array<{
+    id: string;
+    label: string;
+    frames: [string, string, string, string];
+  }>;
+};
 
 export default function MovieStudio() {
   const [health, setHealth] = useState<Health | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
-  const [game, setGame] = useState(0);
-  const [voice, setVoice] = useState(1);
   const [gameGain, setGameGain] = useState(1);
   const [voiceGain, setVoiceGain] = useState(1);
   const [glossary, setGlossary] = useState("");
-  const [reviewOnly, setReviewOnly] = useState(false);
-  const [page, setPage] = useState(0);
+  const [savedAvatarPoses, setSavedAvatarPoses] = useState<MovieAvatarPose[]>([]);
+  const [avatarReady, setAvatarReady] = useState(false);
+  const [avatarPlacement, setAvatarPlacement] = useState<AvatarPlacement>(DEFAULT_PLACEMENT);
   const pauseUpload = useRef(false);
-  const input = useRef<HTMLInputElement>(null);
+  const [localMedia, setLocalMedia] = useState<{ jobId: string; url: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadAvatarSession<StoredAvatarImages>("images")
+      .then((images) => {
+        if (!live || images?.version !== 1 || !Array.isArray(images.avatarPoses)) return;
+        const poses = images.avatarPoses.filter((pose) =>
+          typeof pose.id === "string" &&
+          typeof pose.label === "string" &&
+          Array.isArray(pose.frames) &&
+          pose.frames.length === 4 &&
+          pose.frames.every((frame) => typeof frame === "string" && frame.startsWith("data:image/png")),
+        );
+        setSavedAvatarPoses(poses);
+      })
+      .catch(() => {})
+      .finally(() => { if (live) setAvatarReady(true); });
+    return () => { live = false; };
+  }, []);
+  useEffect(() => {
+    return () => { if (localMedia) URL.revokeObjectURL(localMedia.url); };
+  }, [localMedia]);
   const refreshList = useCallback(async () => {
     const result = await api<{ jobs: Job[] }>("jobs");
     setJobs(result.jobs);
   }, []);
   const select = useCallback((selected: Job) => {
     setJob(selected);
-    setGame(selected.game_index ?? 0);
-    setVoice(selected.voice_index ?? 1);
+    setLocalMedia(null);
+    setError("");
+    setGlossary("");
     setGameGain(selected.game_gain);
     setVoiceGain(selected.voice_gain);
-    setConfirmed(selected.confirmed);
-    setPage(0);
+    const storedPlacement = localStorage.getItem(`movie-avatar-placement:${selected.id}`);
+    try {
+      setAvatarPlacement(selected.avatar?.placement ?? (storedPlacement ? JSON.parse(storedPlacement) as AvatarPlacement : DEFAULT_PLACEMENT));
+    } catch {
+      setAvatarPlacement(selected.avatar?.placement ?? DEFAULT_PLACEMENT);
+    }
     localStorage.setItem("movie-current", selected.id);
   }, []);
   useEffect(() => {
@@ -63,6 +93,9 @@ export default function MovieStudio() {
       })
       .catch((e) => {
         if (live) setError(e.message);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
       });
     const timer = setInterval(() => {
       api<Health>("health")
@@ -78,6 +111,29 @@ export default function MovieStudio() {
   }, [select]);
   const jobId = job?.id;
   const running = !!job && ACTIVE.has(job.state);
+  const autoConvert = useRef<string | null>(null);
+  useEffect(() => {
+    if (!job || !job.analyzed || !["preview_ready", "needs_review"].includes(job.state)) return;
+    const version = `${job.id}:${job.updated}`;
+    if (autoConvert.current === version) return;
+    autoConvert.current = version;
+    void (async () => {
+      setBusy(true);
+      setError("");
+      try {
+        setJob(await post(`jobs/${job.id}/convert`, {
+          confirmed: true,
+          game_gain: gameGain,
+          voice_gain: voiceGain,
+        }));
+        await refreshList();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "変換を開始できませんでした。");
+      } finally {
+        setBusy(false);
+      }
+    })();
+  }, [job, gameGain, voiceGain, refreshList]);
   useEffect(() => {
     if (!jobId || !running) return;
     let live = true;
@@ -86,11 +142,7 @@ export default function MovieStudio() {
         .then((updated) => {
           if (!live) return;
           setJob(updated);
-          if (updated.state === "ready") {
-            setGame(updated.game_index!);
-            setVoice(updated.voice_index!);
-          }
-          if (!ACTIVE.has(updated.state)) void refreshList();
+          if (!ACTIVE.has(updated.state)) void refreshList().catch(() => {});
         })
         .catch((e) => {
           if (live) setError(e.message);
@@ -113,8 +165,57 @@ export default function MovieStudio() {
       setBusy(false);
     }
   }
+  function changeAvatarPlacement(placement: AvatarPlacement) {
+    setAvatarPlacement(placement);
+    if (job) localStorage.setItem(`movie-avatar-placement:${job.id}`, JSON.stringify(placement));
+  }
+  async function attachAvatar(current: Job) {
+    const existing = current.avatar?.poses ?? [];
+    const source = existing.length ? existing : savedAvatarPoses;
+    if (!source.length) return current;
+    const poses: MovieAvatarPose[] = [];
+    for (let poseIndex = 0; poseIndex < source.length; poseIndex++) {
+      const pose = source[poseIndex];
+      const frames: string[] = [];
+      for (let frameIndex = 0; frameIndex < pose.frames.length; frameIndex++) {
+        const name = existing.length ? pose.frames[frameIndex] : `avatar-${poseIndex}-${frameIndex}.png`;
+        if (!existing.length) {
+          const image = await fetch(pose.frames[frameIndex]);
+          if (!image.ok) throw new Error("保存したアバター画像を読み込めませんでした。");
+          await api(`jobs/${current.id}/avatar-assets/${name}`, {
+            method: "PUT",
+            headers: { "Content-Type": "image/png" },
+            body: await image.blob(),
+          });
+        }
+        frames.push(name);
+      }
+      // Avatar storage also has generation-only metadata such as `provider`.
+      // Send only the fields accepted by the Movie job snapshot schema.
+      poses.push({
+        id: pose.id,
+        label: pose.label,
+        frames: frames as MovieAvatarPose["frames"],
+      });
+    }
+    return post<Job>(`jobs/${current.id}/avatar`, {
+      placement: avatarPlacement,
+      poses,
+    });
+  }
+  async function startAnalysis() {
+    if (!job) return;
+    await action(async () => {
+      const prepared = await attachAvatar(job);
+      return post(`jobs/${prepared.id}/analyze`, {
+        game_index: prepared.media?.audio[0]?.index,
+        voice_index: prepared.media?.audio[1]?.index,
+        glossary,
+      });
+    });
+  }
   async function upload(file?: File) {
-    if (!file) return;
+    if (!file || uploading || busy || running) return;
     if (
       !file.name.toLowerCase().endsWith(".mp4") ||
       !file.size ||
@@ -151,6 +252,7 @@ export default function MovieStudio() {
         JSON.stringify({ id: current.id, signature }),
       );
       select(current);
+      setLocalMedia({ jobId: current.id, url: URL.createObjectURL(file) });
       while (current.received < file.size && !pauseUpload.current) {
         const chunk = file.slice(
           current.received,
@@ -188,487 +290,67 @@ export default function MovieStudio() {
       );
     } finally {
       setUploading(false);
-      if (input.current) input.current.value = "";
     }
   }
-  const locked = busy || running || uploading;
-  const reviewCount =
-    job?.segments.filter((s) => s.issue || s.status === "review").length ?? 0;
-  const visible = (job?.segments ?? []).filter(
-    (s) => !reviewOnly || s.issue || s.status === "review",
-  );
-  const hasPreview = !!job?.segments.some((s) => s.status === "done");
-  return (
-    <div
-      className="min-h-screen bg-[#f6f7fb] text-[#171717]"
-      onPlayCapture={(event) =>
-        document
-          .querySelectorAll<HTMLMediaElement>("audio, video")
-          .forEach((el) => {
-            if (el !== event.target) el.pause();
-          })
+  async function selectJob(id: string) {
+    setBusy(true);
+    setError("");
+    try {
+      select(await api<Job>(`jobs/${id}`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "動画を取得できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function deleteJob(id: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`jobs/${id}`, { method: "DELETE" });
+      if (job?.id === id) {
+        setJob(null);
+        setLocalMedia(null);
+        localStorage.removeItem("movie-current");
       }
-    >
-      <header className="border-b border-black/10 bg-white">
-        <div className="mx-auto flex h-24 max-w-7xl items-center gap-4 px-5 sm:px-8">
-          <Image
-            src="/favicon.png"
-            alt=""
-            width={64}
-            height={64}
-            className="rounded-md"
-          />
-          <p className="text-2xl font-semibold tracking-tight sm:text-4xl">
-            chibichara studio
-          </p>
-        </div>
-      </header>
-      <main className="mx-auto max-w-7xl space-y-6 px-5 py-8 sm:px-8">
-        <section className="overflow-hidden rounded-2xl border border-black/10 bg-white shadow-sm">
-          <div className="border-b-4 border-[#22d3ee] bg-[#fffdf5] px-6 py-7 sm:px-8">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="mb-1 text-xs font-black tracking-[0.2em] text-[#9b6b16]">
-                  MOVIE STUDIO
-                </p>
-                <h1 className="text-3xl font-black">
-                  実況を、あなたのキャラクターの声に。
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-slate-600">
-                  ゲーム音はそのままに、発言ごとの感情や話し方を声に反映します。
-                </p>
-              </div>
-              <span className="rounded-full bg-[#e6faff] px-4 py-2 text-sm font-bold text-[#0e7490]">
-                60分まで · 実況者1人
-              </span>
-            </div>
-          </div>
-          <div className="space-y-5 p-6 sm:p-8">
-            <div
-              className={`rounded-xl px-4 py-3 text-sm ${health?.voice_available ? "bg-cyan-50 text-cyan-900" : "bg-amber-50 text-amber-900"}`}
-            >
-              {health?.voice_available ? (
-                "Voiceで保存した最新の声を使用します。処理中は同じ声に固定されます。"
-              ) : (
-                <>
-                  Voiceで声を学習・保存してから変換できます。{" "}
-                  <Link className="font-bold underline" href="/voice">
-                    Voiceを開く →
-                  </Link>
-                </>
-              )}
-              {health?.error && <p className="mt-1">{health.error}</p>}
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-5 rounded-2xl border-2 border-dashed border-cyan-200 bg-cyan-50/40 p-6">
-              <div>
-                <p className="font-bold">2つの音声トラックがあるMP4を選択</p>
-                <p className="mt-2 text-sm text-slate-500">
-                  音声1：ゲーム音　／　音声2：実況音声
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  最大
-                  {Math.round(
-                    (health?.max_bytes ?? 20 * 1024 ** 3) / 1024 ** 3,
-                  )}{" "}
-                  GiB。中断時は同じファイルを選ぶと再開できます。
-                </p>
-              </div>
-              <input
-                ref={input}
-                className="hidden"
-                type="file"
-                accept="video/mp4,.mp4"
-                aria-label="MP4ファイル"
-                onChange={(e) => void upload(e.target.files?.[0])}
-              />
-              <button
-                className={button}
-                disabled={uploading || busy || !health}
-                onClick={() => input.current?.click()}
-              >
-                MP4を選択
-              </button>
-            </div>
-          </div>
-        </section>
-        {error && (
-          <div
-            role="alert"
-            className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800"
-          >
-            {error}
-          </div>
-        )}
-        {job && (
-          <section className="space-y-6 rounded-2xl border border-black/10 bg-white p-6 shadow-sm sm:p-8">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <span className="text-xs font-bold text-cyan-700">
-                  {STATES[job.state] ?? job.state}
-                </span>
-                <h2 className="mt-1 break-all text-xl font-bold">{job.name}</h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  {job.media ? `${stamp(job.media.duration)} · ` : ""}
-                  {(job.size / 1024 ** 2).toFixed(1)} MB
-                </p>
-              </div>
-              {running && (
-                <button
-                  className={secondary}
-                  disabled={busy || job.state === "cancelling"}
-                  onClick={() =>
-                    void action(() => post(`jobs/${job.id}/cancel`))
-                  }
-                >
-                  処理を中止
-                </button>
-              )}
-              {uploading && (
-                <button
-                  className={secondary}
-                  onClick={() => {
-                    pauseUpload.current = true;
-                  }}
-                >
-                  アップロードを一時停止
-                </button>
-              )}
-              {["failed", "cancelled"].includes(job.state) && (
-                <button
-                  className={button}
-                  disabled={busy}
-                  onClick={() =>
-                    void action(() => post(`jobs/${job.id}/resume`))
-                  }
-                >
-                  未完了の工程から再開
-                </button>
-              )}
-            </div>
-            <div aria-live="polite">
-              <p className="text-sm text-slate-600">{job.message}</p>
-              {job.error && (
-                <p className="mt-2 break-words rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                  {job.error}
-                </p>
-              )}
-              {job.warning && (
-                <p className="mt-2 text-sm text-amber-700">{job.warning}</p>
-              )}
-              {(running || job.state === "uploading") && (
-                <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className={`h-full rounded-full bg-cyan-500 transition-all ${running && !job.progress ? "animate-pulse" : ""}`}
-                    style={{
-                      width: `${job.state === "uploading" ? (job.received / job.size) * 100 : Math.max(3, job.progress)}%`,
-                    }}
-                  />
-                </div>
-              )}
-              {job.state === "uploading" && (
-                <p className="mt-2 text-xs text-slate-500">
-                  {((job.received / job.size) * 100).toFixed(1)}%
-                  アップロード済み
-                </p>
-              )}
-            </div>
-            <AudioDiagnostics key={job.id} job={job} />
-            {job.state === "ready" && job.media && (
-              <div className="space-y-5">
-                <div className="grid gap-6 md:grid-cols-2">
-                  {[
-                    { label: "ゲーム音声", value: game, set: setGame },
-                    { label: "実況音声", value: voice, set: setVoice },
-                  ].map((track) => (
-                    <div
-                      key={track.label}
-                      className="space-y-3 rounded-xl bg-slate-50 p-4"
-                    >
-                      <label className="block text-sm font-bold">
-                        {track.label}
-                        <select
-                          className={`${field} mt-2`}
-                          value={track.value}
-                          onChange={(e) => track.set(Number(e.target.value))}
-                        >
-                          {job.media!.audio.map((a, i) => (
-                            <option key={a.index} value={a.index}>
-                              音声トラック{i + 1}
-                              {a.title ? ` · ${a.title}` : ""}（{a.channels}ch）
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <audio
-                        key={track.value}
-                        controls
-                        preload="none"
-                        className="h-10 w-full"
-                        src={fileUrl(job, `track-${track.value}.m4a`)}
-                      />
-                      <p className="text-xs text-slate-500">冒頭30秒の試聴</p>
-                    </div>
-                  ))}
-                </div>
-                <label className="block text-sm font-bold">
-                  ゲーム用語・固有名詞（任意）
-                  <input
-                    className={`${field} mt-2`}
-                    placeholder="キャラクター名、技名、ゲーム名など"
-                    value={glossary}
-                    maxLength={2000}
-                    onChange={(e) => setGlossary(e.target.value)}
-                  />
-                </label>
-                <p className="text-xs leading-6 text-slate-500">
-                  ゲーム音側に実況が混ざっている場合、その声も完成動画に残ります。トラックを別々に試聴して確認してください。
-                </p>
-                <button
-                  className={button}
-                  disabled={
-                    locked ||
-                    !health?.voice_available ||
-                    !health.gemini_configured ||
-                    game === voice
-                  }
-                  onClick={() =>
-                    void action(() =>
-                      post(`jobs/${job.id}/analyze`, {
-                        game_index: game,
-                        voice_index: voice,
-                        glossary,
-                      }),
-                    )
-                  }
-                >
-                  解析してプレビューを作成
-                </button>
-              </div>
-            )}
-            {!!job.segments.length && (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-6">
-                  <div>
-                    <h3 className="text-lg font-bold">発言ごとの確認</h3>
-                    <p className="mt-1 text-sm text-slate-500">
-                      {job.segments.length}発言 · 確認が必要な発言 {reviewCount}
-                      件
-                    </p>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={reviewOnly}
-                      onChange={(e) => {
-                        setReviewOnly(e.target.checked);
-                        setPage(0);
-                      }}
-                    />
-                    要確認だけを表示
-                  </label>
-                </div>
-                <div className="space-y-3">
-                  {visible.slice(page * 15, (page + 1) * 15).map((s) => (
-                    <SegmentEditor
-                      key={`${job.id}:${s.id}:${s.revision}`}
-                      job={job}
-                      segment={s}
-                      disabled={locked}
-                      preview={job.preview_ids?.includes(s.id) ?? false}
-                      onSave={(body, regen) =>
-                        action(async () => {
-                          const updated = await api<Job>(
-                            `jobs/${job.id}/segments/${s.id}`,
-                            {
-                              method: "PATCH",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify(body),
-                            },
-                          );
-                          return regen
-                            ? post<Job>(
-                                `jobs/${job.id}/segments/${s.id}/regenerate`,
-                              )
-                            : updated;
-                        })
-                      }
-                    />
-                  ))}
-                </div>
-                {visible.length > 15 && (
-                  <div className="flex items-center justify-center gap-4 text-sm">
-                    <button
-                      className={secondary}
-                      disabled={page === 0}
-                      onClick={() => setPage(page - 1)}
-                    >
-                      前へ
-                    </button>
-                    {page + 1}/{Math.ceil(visible.length / 15)}
-                    <button
-                      className={secondary}
-                      disabled={(page + 1) * 15 >= visible.length}
-                      onClick={() => setPage(page + 1)}
-                    >
-                      次へ
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-            {job.analyzed && !running && (
-              <div className="space-y-5 rounded-xl bg-[#fffdf5] p-5">
-                <p className="text-sm leading-6 text-slate-600">
-                  元の細かな抑揚や息遣いは完全には一致しません。生成した声に異音がないか、通常の発言と感情のある発言を試聴してください。
-                </p>
-                <div className="grid gap-5 sm:grid-cols-2">
-                  {[
-                    { label: "ゲーム音量", value: gameGain, set: setGameGain },
-                    { label: "実況音量", value: voiceGain, set: setVoiceGain },
-                  ].map((gain) => (
-                    <label key={gain.label} className="text-sm font-bold">
-                      {gain.label} · {Math.round(gain.value * 100)}%
-                      <input
-                        className="mt-3 block w-full accent-cyan-600"
-                        type="range"
-                        min="0"
-                        max="2"
-                        step="0.05"
-                        value={gain.value}
-                        onChange={(e) => gain.set(Number(e.target.value))}
-                      />
-                    </label>
-                  ))}
-                </div>
-                <label className="flex items-start gap-3 text-sm leading-6">
-                  <input
-                    className="mt-1 size-4 accent-cyan-600"
-                    type="checkbox"
-                    checked={confirmed}
-                    disabled={!hasPreview}
-                    onChange={(e) => setConfirmed(e.target.checked)}
-                  />
-                  生成された声を試聴し、声質と音質を確認しました。
-                </label>
-                <button
-                  className={button}
-                  disabled={locked || !confirmed || !hasPreview}
-                  onClick={() =>
-                    void action(() =>
-                      post(`jobs/${job.id}/convert`, {
-                        confirmed,
-                        game_gain: gameGain,
-                        voice_gain: voiceGain,
-                      }),
-                    )
-                  }
-                >
-                  {job.state === "completed"
-                    ? "音量を反映して書き出す"
-                    : "全体を変換・続行"}
-                </button>
-                <p className="text-xs text-slate-500">
-                  要確認の発言は、編集または「この内容で確認済み」を選んでから続行してください。
-                </p>
-              </div>
-            )}
-            {job.state === "completed" && (
-              <div className="space-y-4 border-t border-slate-100 pt-6">
-                <video
-                  key={job.updated}
-                  controls
-                  preload="metadata"
-                  className="max-h-[540px] w-full rounded-xl bg-black"
-                  src={fileUrl(
-                    job,
-                    job.media?.codec === "h264" ? "output.mp4" : "preview.mp4",
-                  )}
-                />
-                <div className="flex flex-wrap gap-3">
-                  <a
-                    className={button}
-                    href={fileUrl(job, "output.mp4")}
-                    download="converted.mp4"
-                  >
-                    MP4をダウンロード
-                  </a>
-                  <a
-                    className={secondary}
-                    href={fileUrl(job, "commentary.wav")}
-                    download="commentary.wav"
-                  >
-                    実況WAVをダウンロード
-                  </a>
-                </div>
-                <p className="text-xs text-slate-500">
-                  ゲーム音と変換後の実況をミックスして収録しています。
-                </p>
-              </div>
-            )}
-            <p className="text-xs leading-6 text-slate-400">
-              処理は画面を閉じても続きます。ファイルは完了・中止後24時間、確認待ちは最終操作から24時間保存されます。
-            </p>
-          </section>
-        )}
-        {!!jobs.length && (
-          <section className="rounded-2xl border border-black/10 bg-white p-6">
-            <h2 className="mb-4 font-bold">最近の動画</h2>
-            <div className="space-y-2">
-              {jobs.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-3 rounded-lg bg-slate-50 px-4 py-3"
-                >
-                  <button
-                    className="min-w-0 flex-1 text-left"
-                    disabled={uploading}
-                    onClick={async () => {
-                      try {
-                        select(await api<Job>(`jobs/${item.id}`));
-                      } catch (e) {
-                        setError(
-                          e instanceof Error
-                            ? e.message
-                            : "動画を取得できませんでした。",
-                        );
-                      }
-                    }}
-                  >
-                    <p className="truncate text-sm font-semibold">
-                      {item.name}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {STATES[item.state] ?? item.state}
-                    </p>
-                  </button>
-                  <button
-                    className="px-2 py-1 text-xs text-slate-500 underline disabled:opacity-30"
-                    disabled={ACTIVE.has(item.state) || busy || uploading}
-                    onClick={async () => {
-                      setBusy(true);
-                      try {
-                        await api(`jobs/${item.id}`, { method: "DELETE" });
-                        if (job?.id === item.id) setJob(null);
-                        await refreshList();
-                      } catch (e) {
-                        setError(
-                          e instanceof Error
-                            ? e.message
-                            : "削除できませんでした。",
-                        );
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  >
-                    削除
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-      </main>
-    </div>
+      await refreshList();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "削除できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <MoviePlayer
+      key={job?.id ?? "empty"}
+      job={job}
+      jobs={jobs}
+      health={health}
+      error={error}
+      busy={busy || loading || !avatarReady}
+      uploading={uploading}
+      localVideoUrl={localMedia?.jobId === job?.id ? localMedia?.url : undefined}
+      avatarPoses={(job?.avatar?.poses ?? savedAvatarPoses).map((pose) => ({
+        ...pose,
+        frames: (job?.avatar ? pose.frames.map((frame) => fileUrl(job, frame)) : pose.frames) as MovieAvatarPose["frames"],
+      }))}
+      avatarPlacement={avatarPlacement}
+      avatarSeed={job?.avatar?.seed ?? 71237}
+      onAvatarPlacementChange={changeAvatarPlacement}
+      onUpload={upload}
+      onPauseUpload={() => { pauseUpload.current = true; }}
+      onSelectJob={selectJob}
+      onDeleteJob={deleteJob}
+      onAnalyze={() => void startAnalysis()}
+      onConvert={() => job && void action(() => post(`jobs/${job.id}/convert`, {
+        confirmed: true, game_gain: gameGain, voice_gain: voiceGain,
+      }))}
+      onCancel={() => job && void action(() => post(`jobs/${job.id}/cancel`))}
+      onResume={() => job && void action(() => post(`jobs/${job.id}/resume`))}
+      settings={{
+        gameGain, voiceGain, glossary,
+        setGameGain, setVoiceGain, setGlossary,
+      }}
+    />
   );
 }

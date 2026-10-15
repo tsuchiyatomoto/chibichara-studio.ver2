@@ -38,4 +38,12 @@ if (!process.env.MOVIE_WORKER_TOKEN) {
   }
 }
 
+if (!process.env.TOONOUT_WORKER_TOKEN) {
+  const dataRoot = process.env.TOONOUT_DATA_DIR || local?.TOONOUT_DATA_DIR || path.join(process.cwd(), ".toonout-data");
+  const tokenPath = path.join(dataRoot, "service.token");
+  if (isFile(tokenPath)) {
+    process.env.TOONOUT_WORKER_TOKEN = readFileSync(tokenPath, "utf8").trim();
+  }
+}
+
 await import("next/dist/bin/next");

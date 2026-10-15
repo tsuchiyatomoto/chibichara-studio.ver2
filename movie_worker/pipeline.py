@@ -77,21 +77,37 @@ def synthesis_input(segment):
     return reading + control["suffix"] if reading else control["input"]
 
 
-def settle_synthesis_failure(segment, message, vocalization):
-    if segment.get("nonverbal") and vocalization in config.VOCALIZATIONS:
-        segment.update(
-            mode="mute",
-            status="accepted",
-            issue=None,
-            fallback_reason=message,
-        )
-        return
-    segment.update(
-        status="review",
-        issue=message
+def silence_segment(segment, message=None, method="automatic_silence"):
+    """Resolve a row that would otherwise require per-utterance review."""
+    reason = (
+        message
         or segment.get("issue")
-        or "再試行回数の上限です。読み・感情を調整して再生成してください。",
+        or "発言を安全に処理できなかったため無音にしました。"
     )
+    segment.update(
+        mode="mute",
+        status="accepted",
+        issue=None,
+        fallback_reason=reason,
+        analysis_resolution=dict(
+            method=method,
+            previous_issue=reason,
+        ),
+    )
+
+
+def silence_review_segments(segments):
+    for segment in segments:
+        if (
+            segment.get("issue")
+            or segment.get("status") == "review"
+            or segment.get("analysis_failed")
+        ):
+            silence_segment(segment)
+
+
+def settle_synthesis_failure(segment, message, _vocalization):
+    silence_segment(segment, message, "synthesis_failure")
 
 
 def fingerprint(owner):
@@ -264,31 +280,13 @@ class Engine:
                 ident, "動画と音声トラックを確認しています。", state="validating"
             )
             info = media.inspect(directory / "input.mp4", check)
-            for track in info["audio"]:
-                media.ffmpeg(
-                    [
-                        "-i",
-                        directory / "input.mp4",
-                        "-map",
-                        f"0:{track['index']}",
-                        "-t",
-                        "30",
-                        "-vn",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "128k",
-                        directory / f"track-{track['index']}.m4a",
-                    ],
-                    check,
-                )
             self.store.patch(
                 ident,
                 media=info,
                 game_index=info["audio"][0]["index"],
                 voice_index=info["audio"][1]["index"],
                 state="ready",
-                message="ゲーム音と実況を試聴して、割り当てを確認してください。",
+                message="トラック1をゲーム音、トラック2を実況音として使用します。",
             )
             return
         if task == "analyze":
@@ -354,37 +352,24 @@ class Engine:
                 check,
                 lambda ss, msg: self.progress(ident, msg, segments=ss),
             )
-            self.store.patch(ident, analyzed=True, gemini_model=config.GEMINI_MODEL)
-            # Include representative emotions; never gate on only neutral speech.
-            chosen, seen = [], set()
-            for seg in sorted(segments, key=lambda s: bool(s["issue"])):
-                if (
-                    not seg["issue"]
-                    and (seg["text"] or (seg.get("nonverbal") and vocalization_kind(seg) in config.VOCALIZATIONS))
-                    and seg["end"] - seg["start"] >= 0.5
-                    and (seg["emotion"] not in seen or not chosen)
-                ):
-                    chosen.append(seg["id"])
-                    seen.add(seg["emotion"])
-                if len(chosen) == 3:
-                    break
-            if not chosen:
-                self.store.patch(
-                    ident,
-                    state="needs_review",
-                    message="読みを指定して、短い発言を再生成してください。",
-                )
-                return
-            self.store.patch(ident, preview_ids=chosen)
-            self.synthesize(ident, chosen, preview=True)
-            return
+            silence_review_segments(segments)
+            self.store.patch(
+                ident,
+                segments=segments,
+                analyzed=True,
+                confirmed=True,
+                preview_ids=[],
+                gemini_model=config.GEMINI_MODEL,
+            )
+            # Analysis now flows directly into full synthesis and export.
+            task = "convert"
         if task in {"convert", "preview", "regenerate"}:
+            job = self.store.get(ident)
             if task == "convert":
-                from .speech_recovery import needs_recovery, recover_segments
-                if any(needs_recovery(s) for s in job["segments"]):
-                    self.progress(ident, "未解決の発言を自動で再確認しています。", state="analyzing")
-                    recover_segments(directory / "analysis.wav", job["segments"], directory, check, report)
-                    self.store.patch(ident, segments=job["segments"])
+                # New jobs are settled immediately after analysis. This also
+                # migrates older jobs that stopped at row-by-row review.
+                silence_review_segments(job["segments"])
+                self.store.patch(ident, segments=job["segments"])
             ids = (
                 [s["id"] for s in job["segments"]]
                 if task == "convert"
@@ -402,15 +387,9 @@ class Engine:
                 s["status"] not in {"done", "accepted"} or s["issue"]
             ]
             if unresolved:
-                first = unresolved[0]
-                reason = first.get("issue") or "音声を生成できていません。"
-                self.store.patch(
-                    ident,
-                    state="needs_review",
-                    message=f"確認が必要な発言が{len(unresolved)}件あります。"
-                    f"最初の箇所（{first['start']:.1f}秒）：{reason}",
-                )
-                return
+                for segment in unresolved:
+                    silence_segment(segment)
+                self.store.patch(ident, segments=job["segments"])
         if task in {"convert", "mix"}:
             job = self.store.get(ident)
             self.progress(
@@ -448,9 +427,8 @@ class Engine:
             if seg["mode"] != "tts":
                 seg.update(status="accepted", issue=None)
             elif (seg["issue"] and not preview) or not synthesis_input(seg):
-                seg["status"] = "review"
+                silence_segment(seg)
             else:
-                # Issue remains visible until the user explicitly accepts/edits it.
                 last = None
                 vocalization = vocalization_kind(seg)
                 for attempt in range(seg.get("attempts", 0), 3):
@@ -584,8 +562,14 @@ class Engine:
                     settle_synthesis_failure(seg, last, vocalization)
             self.store.patch(ident, segments=segments)
         if preview:
+            silenced = sum(s["mode"] != "tts" for s in segments)
+            ready = any(s["status"] == "done" for s in segments)
             self.store.patch(
                 ident,
                 state="preview_ready",
-                message="生成した声を試聴してください。異音や声の違いがないことを確認して全体を変換します。",
+                message=(
+                    "生成した声を試聴してください。確認後に全体を変換します。"
+                    if ready
+                    else "代表音声を生成できなかったため、全体変換へ進めます。"
+                ) + (f" 確認が必要な{silenced}件は無音にしました。" if silenced else ""),
             )

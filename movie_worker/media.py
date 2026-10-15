@@ -1,11 +1,19 @@
 import json
 import math
 import os
+import random
 import subprocess
 import time
 
 import numpy as np
 import soundfile as sf
+from PIL import Image
+
+
+POSE_SILENCE_SECONDS = 2.0
+AVATAR_SCALE_SECONDS = 0.3
+AVATAR_SCALE_PEAK = 1.1
+AVATAR_SCALE_FPS = 30
 
 
 class Cancelled(Exception):
@@ -153,7 +161,7 @@ def mono(source, target):
         )
     if np.max(np.abs(mixed)) < 0.0001:
         raise ValueError(
-            "実況トラックが無音です。トラックの割り当てを確認してください。"
+            "実況音声として使用するトラック2が無音です。"
         )
     sf.write(target, mixed, sr, subtype="PCM_16")
     return warning
@@ -262,29 +270,29 @@ def timeline(job, directory, check):
     ):
         for seg in job["segments"]:
             check()
+            # Muted rows do not need a timeline reservation: the unwritten
+            # span is already silence. Skipping them also lets an invalid or
+            # overlapping review row fail closed without blocking valid speech.
+            if seg["mode"] != "tts":
+                continue
             start, end = round(seg["start"] * 48000), round(seg["end"] * 48000)
             if start < position:
                 raise ValueError(
                     "発言が重なっています。開始・終了時刻を確認してください。"
                 )
             silence(output, start - position)
-            # Never copy source commentary into an export. Unknown and legacy
-            # modes such as "original" fail closed to silence.
-            if seg["mode"] != "tts":
-                data = np.zeros(end - start, dtype="float32")
-            else:
-                data, sr = sf.read(directory / f"seg-{seg['id']}.wav", dtype="float32")
-                if sr != 48000 or len(data) != end - start:
-                    raise ValueError(
-                        "発言の音声と配置時刻が一致しません。再生成してください。"
-                    )
-                original.seek(start)
-                reference = original.read(
-                    end - start, dtype="float32", always_2d=True
-                ).mean(axis=1)
-                before = math.sqrt(float(np.mean(reference**2)))
-                after = math.sqrt(float(np.mean(data**2)))
-                data = data * np.clip(before / max(after, 0.0001), 0.5, 2.0)
+            data, sr = sf.read(directory / f"seg-{seg['id']}.wav", dtype="float32")
+            if sr != 48000 or len(data) != end - start:
+                raise ValueError(
+                    "発言の音声と配置時刻が一致しません。再生成してください。"
+                )
+            original.seek(start)
+            reference = original.read(
+                end - start, dtype="float32", always_2d=True
+            ).mean(axis=1)
+            before = math.sqrt(float(np.mean(reference**2)))
+            after = math.sqrt(float(np.mean(data**2)))
+            data = data * np.clip(before / max(after, 0.0001), 0.5, 2.0)
             output.write(data)
             position = end
         silence(output, max(0, count - position))
@@ -298,14 +306,151 @@ def silence(output, frames):
         frames -= length
 
 
+def avatar_animation(job, directory, commentary, check):
+    """Create a deterministic 10 fps pose/mouth/blink sequence for FFmpeg."""
+    avatar = job["avatar"]
+    duration = float(job["media"]["duration"])
+    fps = 10
+    frame_count = max(1, math.ceil(duration * fps))
+    levels = []
+    with sf.SoundFile(commentary) as voice:
+        block = round(voice.samplerate / fps)
+        for _ in range(frame_count):
+            check()
+            samples = voice.read(block, dtype="float32", always_2d=True)
+            levels.append(
+                math.sqrt(float(np.mean(samples**2))) if len(samples) else 0.0
+            )
+    active = np.asarray([level for level in levels if level > 0.0001])
+    threshold = max(
+        0.0003,
+        float(np.percentile(active, 25)) * 0.55 if active.size else 0.0003,
+    )
+    generator = random.Random(int(avatar.get("seed", 0)))
+    poses = avatar["poses"]
+    pose_index = generator.randrange(len(poses))
+    silence_frames = 0
+    has_spoken = False
+    required_silence_frames = math.ceil(POSE_SILENCE_SECONDS * fps)
+    next_blink = generator.randint(26, 48)
+    blink_until = -1
+    sequence = []
+    events = []
+    scale_events = []
+    for index in range(frame_count):
+        mouth_open = levels[index] >= threshold
+        # Keep the current pose throughout speech and silence. Only a new
+        # utterance after a long enough pause can select a different pose.
+        if mouth_open and has_spoken and silence_frames >= required_silence_frames:
+            scale_events.append({"start": index / fps})
+            if len(poses) > 1:
+                offset = generator.randrange(1, len(poses))
+                pose_index = (pose_index + offset) % len(poses)
+        if mouth_open:
+            has_spoken = True
+            silence_frames = 0
+        else:
+            silence_frames += 1
+        if index >= next_blink:
+            blink_until = index + 2
+            next_blink = index + generator.randint(26, 48)
+        eyes_closed = index < blink_until
+        frame_index = (2 if eyes_closed else 0) + (1 if mouth_open else 0)
+        name = poses[pose_index]["frames"][frame_index]
+        sequence.append(name)
+        start = index / fps
+        end = min(duration, (index + 1) / fps)
+        if events and events[-1]["asset"] == name:
+            events[-1]["end"] = end
+        else:
+            events.append(
+                dict(
+                    start=start,
+                    end=end,
+                    pose=pose_index,
+                    frame=frame_index,
+                    asset=name,
+                )
+            )
+    manifest = ["ffconcat version 1.0"]
+    for index, name in enumerate(sequence):
+        manifest.extend(
+            [f"file '{name}'", f"duration {min(1 / fps, duration - index / fps):.6f}"]
+        )
+    manifest.append(f"file '{sequence[-1]}'")
+    concat = directory / "avatar.ffconcat"
+    concat.write_text("\n".join(manifest) + "\n", encoding="utf-8")
+    (directory / "avatar-animation.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "fps": fps,
+                "duration": duration,
+                "threshold": threshold,
+                "pose_silence_seconds": POSE_SILENCE_SECONDS,
+                "scale_duration": AVATAR_SCALE_SECONDS,
+                "scale_peak": AVATAR_SCALE_PEAK,
+                "scale_fps": AVATAR_SCALE_FPS,
+                "scale_events": scale_events,
+                "events": events,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return concat
+
+
+def avatar_scale_filter(job, directory, side, check):
+    """Animate scale on a fixed transparent canvas, keeping the center stable."""
+    animation = json.loads((directory / "avatar-animation.json").read_text(encoding="utf-8"))
+    commands = [f"0.000000 scale@avatar w {side};"]
+    duration = float(job["media"]["duration"])
+    steps = round(AVATAR_SCALE_SECONDS * AVATAR_SCALE_FPS)
+    for event in animation["scale_events"]:
+        for step in range(1, steps + 1):
+            time = event["start"] + step / AVATAR_SCALE_FPS
+            if time >= duration:
+                break
+            # Reach 110% quickly (0.1s), then ease back to 100% (0.2s).
+            progress = step / steps
+            phase = min(3 * progress, 1.5 * (1 - progress))
+            scale = 1 + (AVATAR_SCALE_PEAK - 1) * (1 - math.cos(math.pi * phase)) / 2
+            width = max(2, 2 * round(side * scale / 2))
+            commands.append(f"{time:.6f} scale@avatar w {width};")
+    command_file = directory / "avatar-scale.cmd"
+    command_file.write_text("\n".join(commands) + "\n", encoding="utf-8")
+    # Padding must accommodate the largest sprite even while scaling, so that
+    # rotation and overlay receive fixed dimensions and never clip the pulse.
+    peak_side = max(2, 2 * math.ceil(side * AVATAR_SCALE_PEAK / 2))
+    peak_height = 2
+    for pose in job["avatar"]["poses"]:
+        for name in pose["frames"]:
+            check()
+            with Image.open(directory / name) as image:
+                peak_height = max(peak_height, 2 * math.ceil(peak_side * image.height / image.width / 2))
+    # Escape both FFmpeg's option parser and its surrounding filter graph.
+    # This includes Windows drive ':' and apostrophes/spaces in job paths.
+    command_path = command_file.resolve().as_posix()
+    for special_characters in ("\\':", "\\'[],;"):
+        command_path = "".join(
+            "\\" + character if character in special_characters else character
+            for character in command_path
+        )
+    return (
+        f"fps={AVATAR_SCALE_FPS},sendcmd=f={command_path},"
+        f"scale@avatar=w={side}:h=-2:eval=frame:flags=lanczos,format=rgba,"
+        f"pad={peak_side}:{peak_height}:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame,"
+    )
+
+
 def mix(job, directory, check, attenuation=1.0):
     commentary = timeline(job, directory, check)
     temp = directory / "output.part.mp4"
     duration = job["media"]["duration"]
     origin = job["media"]["origin"]
-    filters = f"[1:a]volume={job['game_gain']}[g];[2:a]volume={job['voice_gain']}[v];[g][v]amix=inputs=2:normalize=0:duration=longest,aresample=192000,alimiter=limit=0.84:level=0:latency=1,aresample=48000,volume={attenuation},apad[a]"
-    ffmpeg(
-        [
+    audio_filters = f"[1:a]volume={job['game_gain']}[g];[2:a]volume={job['voice_gain']}[v];[g][v]amix=inputs=2:normalize=0:duration=longest,aresample=192000,alimiter=limit=0.84:level=0:latency=1,aresample=48000,volume={attenuation},apad[a]"
+    command = [
             "-copyts",
             "-itsoffset",
             str(-origin),
@@ -315,16 +460,45 @@ def mix(job, directory, check, attenuation=1.0):
             directory / "game.wav",
             "-i",
             commentary,
-            "-filter_complex",
-            filters,
-            "-map",
-            f"0:{job['media']['video_index']}",
-            "-map",
-            "[a]",
-            "-map_metadata",
-            "-1",
-            "-c:v",
-            "copy",
+        ]
+    if job.get("avatar"):
+        concat = avatar_animation(job, directory, commentary, check)
+        placement = job["avatar"]["placement"]
+        side = max(2, round(job["media"]["height"] * placement["scale"] / 2) * 2)
+        angle = math.radians(placement["rotation"])
+        scale_filter = avatar_scale_filter(job, directory, side, check)
+        avatar_filters = (
+            f"[0:{job['media']['video_index']}]setpts=PTS-STARTPTS[base];"
+            f"[3:v]{scale_filter}"
+            + ("hflip," if placement["flip_x"] else "")
+            + f"rotate={angle:.9f}:ow=rotw({angle:.9f}):oh=roth({angle:.9f}):c=none,setpts=PTS-STARTPTS[avatar];"
+            f"[base][avatar]overlay=x='{placement['x']:.9f}*W-w/2':y='{placement['y']:.9f}*H-h/2':shortest=1:eof_action=repeat[outv]"
+        )
+        command.extend(
+            [
+                "-f", "concat", "-safe", "0", "-i", concat,
+                "-filter_complex", audio_filters + ";" + avatar_filters,
+                "-map", "[outv]",
+                "-map", "[a]",
+                "-map_metadata", "-1",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "21",
+                "-pix_fmt", "yuv420p",
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "-filter_complex", audio_filters,
+                "-map", f"0:{job['media']['video_index']}",
+                "-map", "[a]",
+                "-map_metadata", "-1",
+                "-c:v", "copy",
+            ]
+        )
+    command.extend(
+        [
             "-c:a",
             "aac",
             "-b:a",
@@ -338,9 +512,9 @@ def mix(job, directory, check, attenuation=1.0):
             "-movflags",
             "+faststart",
             temp,
-        ],
-        check,
+        ]
     )
+    ffmpeg(command, check)
     info = probe(temp, check)
     if (
         len([s for s in info["streams"] if s["codec_type"] == "audio"]) != 1
@@ -380,7 +554,7 @@ def mix(job, directory, check, attenuation=1.0):
             )
         return mix(job, directory, check, 10 ** ((-1.2 - peak) / 20))
     os.replace(temp, directory / "output.mp4")
-    if job["media"]["codec"] != "h264":
+    if not job.get("avatar") and job["media"]["codec"] != "h264":
         ffmpeg(
             [
                 "-i",

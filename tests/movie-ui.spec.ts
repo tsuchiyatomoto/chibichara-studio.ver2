@@ -45,7 +45,7 @@ test("Movie uploads two tracks, resumes after reload, and scopes private media",
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("http://localhost:3000/movie");
   await expect(
-    page.getByRole("heading", { name: "実況を、あなたのキャラクターの声に。" }),
+    page.getByRole("heading", { name: "動画をここにドロップ" }),
   ).toBeVisible();
   await expect(
     page.getByText(
@@ -56,19 +56,21 @@ test("Movie uploads two tracks, resumes after reload, and scopes private media",
     page.getByRole("button", { name: "MP4を選択", exact: true }),
   ).toBeEnabled();
   await page.getByLabel("MP4ファイル").setInputFiles(input);
-  await expect(
-    page.getByRole("combobox", { name: "ゲーム音声", exact: true }),
-  ).toBeVisible({ timeout: 45000 });
-  await expect(
-    page.getByRole("combobox", { name: "実況音声", exact: true }),
-  ).toBeVisible();
+  await expect.poll(
+    () => page.evaluate(() => localStorage.getItem("movie-current")),
+  ).not.toBeNull();
   const id = await page.evaluate(() => localStorage.getItem("movie-current"));
+  await expect.poll(async () => {
+    const response = await page.request.get(`http://localhost:3000/api/movie/jobs/${id}`);
+    return (await response.json()).state;
+  }).not.toBe("uploading");
+  await expect(page.getByRole("combobox")).toHaveCount(0);
+  await expect(page.locator("audio")).toHaveCount(0);
   await page.reload();
   await expect(
     page.getByRole("heading", { name: "two-tracks.mp4", exact: true }),
   ).toBeVisible();
-  const audioUrl = await page.locator("audio").first().getAttribute("src");
-  const range = await page.request.get(`http://localhost:3000${audioUrl}`, {
+  const range = await page.request.get(`http://localhost:3000/api/movie/jobs/${id}/files/input.mp4`, {
     headers: { Range: "bytes=0-15" },
   });
   expect(range.status()).toBe(206);
@@ -94,8 +96,10 @@ test("Movie uploads two tracks, resumes after reload, and scopes private media",
     ),
   ).toBeTruthy();
   expect(errors).toEqual([]);
-  await page.getByRole("button", { name: "削除", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "two-tracks.mp4", exact: true }),
-  ).toHaveCount(0);
+  await page.request.post(`http://localhost:3000/api/movie/jobs/${id}/cancel`);
+  await expect.poll(async () => {
+    const response = await page.request.get(`http://localhost:3000/api/movie/jobs/${id}`);
+    return (await response.json()).state;
+  }).toMatch(/^(ready|failed|cancelled)$/);
+  expect((await page.request.delete(`http://localhost:3000/api/movie/jobs/${id}`)).ok()).toBe(true);
 });

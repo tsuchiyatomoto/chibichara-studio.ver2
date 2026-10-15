@@ -24,6 +24,7 @@ test("failed audio requests expose timings and full diagnostics after a successf
         : { jobs: [job] },
   }));
   await page.goto("http://localhost:3000/movie");
+  await page.getByRole("button", { name: "設定・詳細" }).click();
   await page.getByText("音声解析の診断ログ", { exact: true }).click();
   await expect(page.getByText("13:28.5〜13:58.3 · 音声解析", { exact: true })).toHaveCount(1);
   await expect(page.getByText("試行 2/3 · 所要時間 119.2秒 · 設定期限 120秒", { exact: true })).toBeVisible();
@@ -43,6 +44,7 @@ test("legacy failures explain that detailed records start with the next request"
         : { jobs: [job] },
   }));
   await page.goto("http://localhost:3000/movie");
+  await page.getByRole("button", { name: "設定・詳細" }).click();
   await page.getByText("音声解析の診断ログ", { exact: true }).click();
   await expect(page.getByText(/この機能の追加前に起きたエラーの詳細は記録されていません/)).toBeVisible();
   await expect(page.getByRole("link", { name: "診断ログをダウンロード" })).toHaveCount(0);

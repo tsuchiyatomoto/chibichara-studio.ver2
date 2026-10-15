@@ -1067,7 +1067,7 @@ export default function VoiceStudio() {
               width={72}
               height={72}
               priority
-              className="h-[72px] w-[72px] shrink-0 rounded-md object-contain"
+              className="h-18 w-18 shrink-0 rounded-md object-contain"
             />
             <p className="hidden text-4xl font-semibold tracking-tight sm:block">
               chibichara studio
@@ -1143,7 +1143,7 @@ export default function VoiceStudio() {
         ) : null}
         <form
           onSubmit={handleSubmit}
-          className="mx-auto grid w-full max-w-[1024px] items-stretch gap-6 lg:grid-cols-2"
+          className="mx-auto grid w-full max-w-5xl items-stretch gap-6 lg:grid-cols-2"
         >
           <div className="h-full overflow-hidden rounded-xl border border-black/10 bg-white shadow-sm">
             <section className="space-y-5 border-b border-black/10 bg-[#fffdf5] p-5 sm:p-6">
@@ -1373,7 +1373,7 @@ export default function VoiceStudio() {
                 disabled={
                   controlsDisabled || remainingTrainingSampleTexts.length === 0
                 }
-                className="flex h-12 w-full items-center justify-center gap-2 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-[2px] active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
+                className="flex h-12 w-full items-center justify-center gap-2 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-0.5 active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
               >
                 <MicrophoneIcon className="h-5 w-5" />
                 {isGenerating && generationProgress
@@ -1631,7 +1631,9 @@ export default function VoiceStudio() {
                   onClick={() => void handleResetSamples()}
                   className="min-h-11 w-full rounded-xl border border-[#b91c1c] bg-white px-4 py-2 text-sm font-bold text-[#b91c1c] transition hover:bg-[#fff1f2] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  ボイスをすべて削除
+                  {displayedSpeakerJob?.result?.saved
+                    ? "ボイスモデルを削除"
+                    : "ボイスをすべて削除"}
                 </button>
                 {displayedSpeakerJob?.status === "completed" && displayedSpeakerJob.result ? (
                   <div role="status">

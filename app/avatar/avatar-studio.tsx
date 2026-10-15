@@ -2,11 +2,14 @@
 
 import Image from "next/image";
 import { type SubmitEvent, useEffect, useState } from "react";
+import { loadAvatarSession, saveAvatarSession } from "./avatar-storage";
 
 type GenerateImageResponse = {
   image?: string;
+  sourceImage?: string;
   model?: string;
   provider?: ImageProvider;
+  backgroundRemovalModel?: string;
   error?: string;
   detail?: string;
 };
@@ -19,7 +22,7 @@ const IMAGE_PROVIDER_OPTIONS: ReadonlyArray<{
   label: string;
 }> = [
   { id: "vertex", label: "Nano Banana 2" },
-  { id: "openai", label: "GPT Image 2" },
+  { id: "openai", label: "GPT Image 2.5 Sunburst" },
 ];
 
 const AVATAR_FRAME_LABELS = [
@@ -28,6 +31,8 @@ const AVATAR_FRAME_LABELS = [
   "目閉じ・口閉じ",
   "目閉じ・口開き",
 ] as const;
+
+const AVATAR_POSE_INTERVAL_MS = 4000;
 
 const OPEN_MOUTH_FRAME_PROMPT =
   "Change only the mouth from fully closed to a small, natural open speaking mouth. Preserve both eyes exactly as they appear in the reference image.";
@@ -254,6 +259,37 @@ type PoseGroup = {
   options: ReadonlyArray<{ label: string; prompt: string }>;
 };
 
+type AvatarPose = {
+  id: PoseGroupId;
+  label: string;
+  instruction?: string;
+  provider?: ImageProvider;
+  frames: [string, string, string, string];
+};
+
+type StoredAvatarImages = {
+  version: 1;
+  character: GenerateImageResponse | null;
+  avatarPoses: AvatarPose[];
+};
+
+type StoredAvatarEditor = {
+  version: 1;
+  imageProvider: ImageProvider;
+  activeEditorSection: EditorSection;
+  activeAttribute: AttributeId;
+  attributeSelections: Record<AttributeId, string>;
+  customModes: Record<AttributeId, boolean>;
+  customPrompts: Record<AttributeId, string>;
+  attributeInputMode: AttributeInputMode;
+  globalCharacterPrompt: string;
+  activePoseGroupId: PoseGroupId;
+  poseSelections: Record<PoseGroupId, string | null>;
+  poseCustomModes: Record<PoseGroupId, boolean>;
+  poseCustomPrompts: Record<PoseGroupId, string>;
+  activeResultView: ResultView;
+};
+
 const POSE_GROUPS: ReadonlyArray<PoseGroup> = [
   {
     id: "basic",
@@ -264,12 +300,12 @@ const POSE_GROUPS: ReadonlyArray<PoseGroup> = [
         prompt: "a natural relaxed standing pose",
       },
       { label: "両手を合わせる", prompt: "both hands clasped together" },
-      { label: "首かしげ", prompt: "tilting the head slightly" },
+      { label: "手を振る", prompt: "waving with one hand" },
       {
         label: "耳に手を当てる",
         prompt: "holding one hand gently against one ear as if listening",
       },
-      { label: "手振り", prompt: "waving with one hand" },
+      { label: "ジャンプ", prompt: "jumping with both feet off the ground" },
       { label: "片手ピース", prompt: "making a peace sign with one hand" },
     ],
   },
@@ -323,6 +359,22 @@ const INITIAL_POSE_CUSTOM_PROMPTS: Record<PoseGroupId, string> = {
   reaction: "",
 };
 
+function getSelectedPoses(
+  selections: Record<PoseGroupId, string | null>,
+  customModes: Record<PoseGroupId, boolean>,
+  customPrompts: Record<PoseGroupId, string>,
+) {
+  return POSE_GROUPS.flatMap((group) => {
+    const option = group.options.find(({ label }) => label === selections[group.id]);
+    if (!customModes[group.id] && !option) return [];
+    return [{
+      id: group.id,
+      label: group.label,
+      instruction: customModes[group.id] ? customPrompts[group.id].trim() : option!.prompt,
+    }];
+  });
+}
+
 const INITIAL_ATTRIBUTE_SELECTIONS: Record<AttributeId, string> = {
   gender: "女の子",
   hairstyle: "ボブ",
@@ -364,7 +416,9 @@ const INITIAL_CUSTOM_PROMPTS: Record<AttributeId, string> = {
 };
 
 export default function AvatarStudio() {
-  const [imageProvider, setImageProvider] = useState<ImageProvider>("vertex");
+  const [imageProvider, setImageProvider] = useState<ImageProvider>(
+    IS_DEVELOPMENT ? "vertex" : "openai",
+  );
   const [isProductionUiPreview, setIsProductionUiPreview] = useState(false);
   const [activeEditorSection, setActiveEditorSection] =
     useState<EditorSection>("attributes");
@@ -392,7 +446,8 @@ export default function AvatarStudio() {
     character: null,
     avatar: null,
   });
-  const [avatarFrames, setAvatarFrames] = useState<string[]>([]);
+  const [avatarPoses, setAvatarPoses] = useState<AvatarPose[]>([]);
+  const [activeAvatarPoseIndex, setActiveAvatarPoseIndex] = useState(0);
   const [isAvatarMouthOpen, setIsAvatarMouthOpen] = useState(false);
   const [areAvatarEyesClosed, setAreAvatarEyesClosed] = useState(false);
   const [isAvatarPreviewPlaying, setIsAvatarPreviewPlaying] = useState(true);
@@ -404,7 +459,14 @@ export default function AvatarStudio() {
   const [generationProgress, setGenerationProgress] = useState(100);
   const [generationProgressTarget, setGenerationProgressTarget] = useState(100);
   const [generationProgressRunId, setGenerationProgressRunId] = useState(0);
+  const [generationMessage, setGenerationMessage] = useState("");
   const [error, setError] = useState("");
+  const [storageReady, setStorageReady] = useState(false);
+  const [storageWritable, setStorageWritable] = useState(false);
+  const [storageReadError, setStorageReadError] = useState("");
+  const [imageSaveError, setImageSaveError] = useState("");
+  const [editorSaveError, setEditorSaveError] = useState("");
+  const storageError = storageReadError || imageSaveError || editorSaveError;
 
   const activeGroup =
     ATTRIBUTE_GROUPS.find(({ id }) => id === activeAttribute) ??
@@ -424,14 +486,31 @@ export default function AvatarStudio() {
     activeEditorSection === "attributes" ? "character" : "avatar";
   const generationTargetLabel =
     generationTarget === "character" ? "キャラクター" : "アバター";
+  const selectedImageProvider = IS_DEVELOPMENT && !isProductionUiPreview
+    ? imageProvider
+    : "openai";
+  const selectedPoses = getSelectedPoses(poseSelections, poseCustomModes, poseCustomPrompts);
+  const pendingAvatarPoses = selectedPoses.filter((pose) => {
+    const saved = avatarPoses.find(({ id }) => id === pose.id);
+    return !saved || saved.instruction !== pose.instruction ||
+      (saved.provider !== undefined && saved.provider !== selectedImageProvider);
+  });
   const activeResult = results[activeResultView];
   const activeResultLabel =
     activeResultView === "character" ? "キャラクター" : "アバター";
   const isGenerating = generatingResultView !== null;
+  const activeAvatarPose = avatarPoses[activeAvatarPoseIndex];
+  const activeImageProvider =
+    activeResultView === "avatar"
+      ? activeAvatarPose?.provider
+      : activeResult?.provider;
+  const avatarFrames = activeAvatarPose?.frames ?? [];
   const animatedAvatarFrameIndex =
     (areAvatarEyesClosed ? 2 : 0) + (isAvatarMouthOpen ? 1 : 0);
   const isAvatarFrameInspectionPaused =
     IS_DEVELOPMENT && !isProductionUiPreview && !isAvatarPreviewPlaying;
+  const isAvatarPoseSwitchingPaused =
+    isAvatarFrameInspectionPaused || isGenerating;
   const activeAvatarFrameIndex = isAvatarFrameInspectionPaused
     ? selectedAvatarFrameIndex
     : animatedAvatarFrameIndex;
@@ -487,6 +566,144 @@ export default function AvatarStudio() {
     };
   }, [avatarFrames.length, isAvatarFrameInspectionPaused]);
 
+  useEffect(() => {
+    if (
+      avatarPoses.length < 2 ||
+      isAvatarPoseSwitchingPaused ||
+      activeResultView !== "avatar"
+    ) {
+      return;
+    }
+
+    const poseTimer = window.setInterval(() => {
+      const offset = 1 + Math.floor(Math.random() * (avatarPoses.length - 1));
+      setActiveAvatarPoseIndex((current) =>
+        (current + offset) % avatarPoses.length,
+      );
+    }, AVATAR_POSE_INTERVAL_MS);
+
+    return () => window.clearInterval(poseTimer);
+  }, [avatarPoses.length, isAvatarPoseSwitchingPaused, activeResultView]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const [images, editor] = await Promise.all([
+          loadAvatarSession<StoredAvatarImages>("images"),
+          loadAvatarSession<StoredAvatarEditor>("editor"),
+        ]);
+        if (cancelled) return;
+        if (
+          (images && (
+            images.version !== 1 ||
+            !Array.isArray(images.avatarPoses) ||
+            images.avatarPoses.length > POSE_GROUPS.length ||
+            (images.character !== null && typeof images.character?.image !== "string") ||
+            (!images.character && images.avatarPoses.length > 0) ||
+            images.avatarPoses.some((pose) =>
+              !pose || !POSE_GROUPS.some(({ id }) => id === pose.id) ||
+              !Array.isArray(pose.frames) || pose.frames.length !== AVATAR_FRAME_LABELS.length ||
+              pose.frames.some((frame) => typeof frame !== "string"),
+            )
+          )) ||
+          (editor && editor.version !== 1)
+        ) {
+          throw new Error("保存形式を読み込めませんでした。");
+        }
+        if (images) {
+          // Older snapshots have no generation instruction. Use their saved
+          // editor settings as the initial baseline, without regenerating images.
+          const savedSelections = getSelectedPoses(
+            editor?.poseSelections ?? INITIAL_POSE_SELECTIONS,
+            editor?.poseCustomModes ?? INITIAL_POSE_CUSTOM_MODES,
+            editor?.poseCustomPrompts ?? INITIAL_POSE_CUSTOM_PROMPTS,
+          );
+          const restoredPoses = images.avatarPoses.map((pose) => {
+            const selection = savedSelections.find(({ id }) => id === pose.id);
+            return pose.instruction === undefined && selection
+              ? { ...pose, instruction: selection.instruction }
+              : pose;
+          });
+          const poseIndex = Math.max(0, restoredPoses.findIndex(({ id }) => id === editor?.activePoseGroupId));
+          const pose = restoredPoses[poseIndex];
+          setResults({
+            character: images.character,
+            avatar: pose ? { image: pose.frames[0], provider: pose.provider } : null,
+          });
+          setAvatarPoses(restoredPoses);
+          setActiveAvatarPoseIndex(poseIndex);
+          if (restoredPoses.some((pose, index) => pose !== images.avatarPoses[index])) {
+            try {
+              await saveAvatarSession("images", { ...images, avatarPoses: restoredPoses });
+            } catch {
+              if (!cancelled) setImageSaveError("ポーズの設定を保存できませんでした。ブラウザの保存設定を確認してください。");
+            }
+            if (cancelled) return;
+          }
+        }
+        if (editor) {
+          setImageProvider(IS_DEVELOPMENT ? editor.imageProvider : "openai");
+          setActiveEditorSection(editor.activeEditorSection);
+          setActiveAttribute(editor.activeAttribute);
+          setAttributeSelections(editor.attributeSelections);
+          setCustomModes(editor.customModes);
+          setCustomPrompts(editor.customPrompts);
+          setAttributeInputMode(editor.attributeInputMode);
+          setGlobalCharacterPrompt(editor.globalCharacterPrompt);
+          setActivePoseGroupId(editor.activePoseGroupId);
+          setPoseSelections(editor.poseSelections);
+          setPoseCustomModes(editor.poseCustomModes);
+          setPoseCustomPrompts(editor.poseCustomPrompts);
+          setActiveResultView(editor.activeResultView);
+        }
+        setStorageWritable(true);
+      } catch {
+        if (!cancelled) {
+          setStorageReadError("保存した画像を読み込めませんでした。保存済みデータを保護するため、自動保存を停止しています。ブラウザの保存設定を確認して再読み込みしてください。");
+        }
+      } finally {
+        if (!cancelled) setStorageReady(true);
+      }
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady || !storageWritable) return;
+    let cancelled = false;
+    // Keep editor changes separate so typing and tab switches do not rewrite images.
+    const editor: StoredAvatarEditor = {
+      version: 1,
+      imageProvider, activeEditorSection, activeAttribute, attributeSelections,
+      customModes, customPrompts, attributeInputMode, globalCharacterPrompt,
+      activePoseGroupId, poseSelections, poseCustomModes, poseCustomPrompts,
+      activeResultView,
+    };
+    void saveAvatarSession("editor", editor).then(
+      () => { if (!cancelled) setEditorSaveError(""); },
+      () => {
+        if (!cancelled) setEditorSaveError("生成設定をブラウザに保存できませんでした。空き容量やブラウザの保存設定を確認してください。");
+      },
+    );
+    return () => { cancelled = true; };
+  }, [storageReady, storageWritable, imageProvider, activeEditorSection, activeAttribute,
+    attributeSelections, customModes, customPrompts, attributeInputMode, globalCharacterPrompt,
+    activePoseGroupId, poseSelections, poseCustomModes, poseCustomPrompts, activeResultView]);
+
+  async function persistImages(character: GenerateImageResponse | null, poses: AvatarPose[]) {
+    if (!storageWritable) return;
+    const images: StoredAvatarImages = { version: 1, character, avatarPoses: poses };
+    try {
+      // Data URLs survive reloads. Commit the whole set atomically before enabling generation again.
+      await saveAvatarSession("images", images);
+      setImageSaveError("");
+    } catch {
+      setImageSaveError("画像をブラウザに保存できませんでした。今回生成した画像は再読み込みすると失われます。空き容量やブラウザの保存設定を確認してください。");
+    }
+  }
+
   function handleCustomModeToggle(groupId: AttributeId) {
     const nextIsCustom = !customModes[groupId];
 
@@ -521,13 +738,17 @@ export default function AvatarStudio() {
     });
   }
 
-  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+  function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
-    const target = generationTarget;
-    const selectedImageProvider = isProductionUiPreview
-      ? "vertex"
-      : imageProvider;
-    const baseCharacterImage = results.character?.image;
+    void generateImages(generationTarget);
+  }
+
+  async function generateImages(target: ResultView, regeneratePoseId?: PoseGroupId) {
+    if (!storageReady || isGenerating) {
+      return;
+    }
+
+    const baseCharacterImage = results.character?.sourceImage ?? results.character?.image;
 
     if (target === "avatar" && !baseCharacterImage) {
       setActiveResultView("character");
@@ -559,38 +780,41 @@ export default function AvatarStudio() {
       return;
     }
 
-    const emptyCustomPoseGroup =
-      target === "avatar" &&
-      poseCustomModes.basic &&
-      !poseCustomPrompts.basic.trim()
-        ? POSE_GROUPS.find(({ id }) => id === "basic")
-        : undefined;
+    // Capture this render's settings; edits during generation apply next time.
+    const requestedPoses = regeneratePoseId
+      ? selectedPoses.filter(({ id }) => id === regeneratePoseId)
+      : selectedPoses;
+    const posesToGenerate = regeneratePoseId ? requestedPoses : pendingAvatarPoses;
 
-    if (emptyCustomPoseGroup) {
-      setActiveEditorSection("pose");
-      setActivePoseGroupId(emptyCustomPoseGroup.id);
-      setError(`${emptyCustomPoseGroup.label}の文章を入力してください。`);
-      return;
+    if (target === "avatar") {
+      const emptyPose = requestedPoses.find(({ instruction }) => !instruction);
+      if (emptyPose) {
+        setActivePoseGroupId(emptyPose.id);
+        setError(`${emptyPose.label}の文章を入力してください。`);
+        return;
+      }
+      if (requestedPoses.length === 0) {
+        setError("ポーズを1つ以上選択してください。");
+        return;
+      }
+      if (posesToGenerate.length === 0) {
+        setError("");
+        setActiveResultView("avatar");
+        return;
+      }
     }
 
     setError("");
     setGenerationProgress(0);
-    setGenerationProgressTarget(target === "avatar" ? 20 : 92);
+    setGenerationProgressTarget(target === "avatar" ? 20 / posesToGenerate.length : 92);
+    setGenerationMessage(
+      target === "character"
+        ? "キャラクターを生成しています。"
+        : "アバターを生成しています。",
+    );
     setGenerationProgressRunId((current) => current + 1);
     setGeneratingResultView(target);
     setActiveResultView(target);
-    setResults((current) => ({
-      ...current,
-      [target]: null,
-    }));
-
-    if (target === "avatar") {
-      setAvatarFrames([]);
-      setIsAvatarMouthOpen(false);
-      setAreAvatarEyesClosed(false);
-      setIsAvatarPreviewPlaying(true);
-      setSelectedAvatarFrameIndex(0);
-    }
 
     try {
       if (target === "character") {
@@ -616,64 +840,101 @@ export default function AvatarStudio() {
         setGenerationProgress(100);
         setGenerationProgressTarget(100);
 
-        setAvatarFrames([]);
+        setAvatarPoses([]);
+        setActiveAvatarPoseIndex(0);
         setIsAvatarMouthOpen(false);
         setAreAvatarEyesClosed(false);
         setResults({
           character: data,
           avatar: null,
         });
+        await persistImages(data, []);
       } else {
-        const poseOneGroup = POSE_GROUPS.find(({ id }) => id === "basic");
-        const selectedPoseOne = poseOneGroup?.options.find(
-          ({ label }) => label === poseSelections.basic,
-        );
-        const poseOneInstruction = poseCustomModes.basic
-          ? poseCustomPrompts.basic.trim()
-          : (selectedPoseOne?.prompt ?? "a natural relaxed standing pose");
-        const posedAvatarPrompt = `Use the provided image as the canonical character reference. Create one full-body square avatar of exactly the same character performing this pose: ${poseOneInstruction}. Preserve the character's identity, face, hairstyle, hair color, eye design and color, clothing, body proportions, chibi art style, line work, and colors. Keep the same character scale and centered framing on a flat, uniform pure-white background. Show only one character with the full body visible. Keep both eyes fully open and the mouth fully closed. Do not add text, borders, guides, props, or extra characters.`;
-        const posedAvatar = await requestGeneratedImage(
-          posedAvatarPrompt,
-          selectedImageProvider,
-          baseCharacterImage,
-        );
-        setGenerationProgress(25);
-        setGenerationProgressTarget(45);
+        const totalImages = posesToGenerate.length * AVATAR_FRAME_LABELS.length;
+        let completedImages = 0;
+        let completedPoses = avatarPoses;
         const frameEditPrefix =
           "Edit the provided posed avatar into one frame-difference image for blinking and lip-sync animation. Preserve the exact canvas coordinates. Do not redraw, move, rescale, crop, rotate, recolor, or otherwise alter the character, pose, head angle, hands, body, hair, clothing, outline, lighting, framing, or pure-white background. ";
-        const openMouthFrame = await requestGeneratedImage(
-          `${frameEditPrefix}${OPEN_MOUTH_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
-          selectedImageProvider,
-          posedAvatar.image,
-        );
-        setGenerationProgress(50);
-        setGenerationProgressTarget(70);
-        const closedEyesOpenMouthFrame = await requestGeneratedImage(
-          `${frameEditPrefix}${CLOSE_EYES_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
-          selectedImageProvider,
-          openMouthFrame.image,
-        );
-        setGenerationProgress(75);
-        setGenerationProgressTarget(92);
-        const closedEyesClosedMouthFrame = await requestGeneratedImage(
-          `${COMBINE_CLOSED_EYES_FRAME_PROMPT} Return only the completed square frame with no text or guides.`,
-          selectedImageProvider,
-          posedAvatar.image,
-          closedEyesOpenMouthFrame.image,
-        );
-        setGenerationProgress(100);
-        setGenerationProgressTarget(100);
 
-        setAvatarFrames([
-          posedAvatar.image,
-          openMouthFrame.image,
-          closedEyesClosedMouthFrame.image,
-          closedEyesOpenMouthFrame.image,
-        ]);
-        setResults((current) => ({
-          ...current,
-          avatar: posedAvatar,
-        }));
+        async function generateFrame(
+          poseLabel: string,
+          prompt: string,
+          referenceImage?: string,
+          secondaryReferenceImage?: string,
+        ) {
+          setGenerationMessage(
+            `${poseLabel}を生成しています（${completedImages + 1} / ${totalImages}枚）。`,
+          );
+          const frame = await requestGeneratedImage(
+            prompt,
+            selectedImageProvider,
+            referenceImage,
+            secondaryReferenceImage,
+          );
+          completedImages += 1;
+          setGenerationProgress((completedImages / totalImages) * 100);
+          setGenerationProgressTarget(
+            (Math.min(totalImages, completedImages + 0.8) / totalImages) * 100,
+          );
+          return frame;
+        }
+
+        for (const pose of posesToGenerate) {
+          const posedAvatarPrompt = `Use the provided image as the canonical character reference. Create one full-body square avatar of exactly the same character performing this pose: ${pose.instruction}. Preserve the character's identity, face, hairstyle, hair color, eye design and color, clothing, body proportions, chibi art style, line work, and colors. Keep the same character scale and centered framing on a flat, uniform pure-white background. Show only one character with the full body visible. Keep both eyes fully open and the mouth fully closed. Do not add text, borders, guides, props, or extra characters.`;
+          const posedAvatar = await generateFrame(
+            pose.label,
+            posedAvatarPrompt,
+            baseCharacterImage,
+          );
+          const openMouthFrame = await generateFrame(
+            pose.label,
+            `${frameEditPrefix}${OPEN_MOUTH_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
+            posedAvatar.sourceImage ?? posedAvatar.image,
+          );
+          const closedEyesOpenMouthFrame = await generateFrame(
+            pose.label,
+            `${frameEditPrefix}${CLOSE_EYES_FRAME_PROMPT} Return only the edited square image with no text or guides.`,
+            openMouthFrame.sourceImage ?? openMouthFrame.image,
+          );
+          const closedEyesClosedMouthFrame = await generateFrame(
+            pose.label,
+            `${COMBINE_CLOSED_EYES_FRAME_PROMPT} Return only the completed square frame with no text or guides.`,
+            posedAvatar.sourceImage ?? posedAvatar.image,
+            closedEyesOpenMouthFrame.sourceImage ?? closedEyesOpenMouthFrame.image,
+          );
+
+          const generatedPose: AvatarPose = {
+            id: pose.id,
+            label: pose.label,
+            instruction: pose.instruction,
+            provider: posedAvatar.provider ?? selectedImageProvider,
+            frames: [
+              posedAvatar.image,
+              openMouthFrame.image,
+              closedEyesClosedMouthFrame.image,
+              closedEyesOpenMouthFrame.image,
+            ],
+          };
+
+          // Commit each completed pose before starting the next; keep unfinished slots intact.
+          completedPoses = POSE_GROUPS.flatMap(({ id }) => {
+            const existing = id === generatedPose.id
+              ? generatedPose
+              : completedPoses.find((item) => item.id === id);
+            return existing ? [existing] : [];
+          });
+          setAvatarPoses(completedPoses);
+          setActiveAvatarPoseIndex(completedPoses.findIndex(({ id }) => id === generatedPose.id));
+          setIsAvatarMouthOpen(false);
+          setAreAvatarEyesClosed(false);
+          setIsAvatarPreviewPlaying(true);
+          setSelectedAvatarFrameIndex(0);
+          setResults((current) => ({
+            ...current,
+            avatar: posedAvatar,
+          }));
+          await persistImages(results.character, completedPoses);
+        }
       }
     } catch (generationError) {
       setError(
@@ -708,8 +969,10 @@ export default function AvatarStudio() {
         <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,500px)_minmax(0,1fr)]">
           <form
             onSubmit={handleSubmit}
+            aria-busy={!storageReady}
             className="overflow-hidden rounded-xl border border-black/10 bg-white shadow-sm"
           >
+            <fieldset disabled={!storageReady} className="contents">
             {IS_DEVELOPMENT && !isProductionUiPreview ? (
               <div className="border-b border-black/10 bg-[#f3ecdc] p-4 sm:px-6">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1084,7 +1347,8 @@ export default function AvatarStudio() {
                     </div>
                   </div>
                   <p className="mb-5 text-sm leading-6 text-[#686052]">
-                    ポーズ1〜3から各1つ、合計最大3つまで指定できます。
+                    選択済みのポーズを番号順に、各4枚ずつ連続生成します。3ポーズなら合計12枚です。生成済みのポーズは4枚完成後に置き換え、未選択のポーズの画像は保持します。
+                    最大3ポーズを保存でき、複数ある場合は4秒ごとにランダムに切り替えます。
                   </p>
 
                   <div
@@ -1101,7 +1365,10 @@ export default function AvatarStudio() {
                           key={group.id}
                           type="button"
                           aria-pressed={isActive}
-                          onClick={() => setActivePoseGroupId(group.id)}
+                          onClick={() => {
+                            setActivePoseGroupId(group.id);
+                            setError("");
+                          }}
                           className={`min-h-15 rounded-lg border px-3 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
                             isActive
                               ? "border-[#0891b2] bg-[#22d3ee] text-[#083344] shadow-[0_2px_0_#0891b2]"
@@ -1226,9 +1493,26 @@ export default function AvatarStudio() {
             </section>
 
             <div className="flex flex-col gap-3 p-5 sm:p-6">
+              {!storageReady ? (
+                <p role="status" className="text-sm text-[#686052]">
+                  保存した画像を読み込んでいます…
+                </p>
+              ) : isGenerating ? (
+                <p role="status" className="text-sm text-[#686052]">
+                  {generationMessage}
+                </p>
+              ) : generationTarget === "avatar" && results.character?.image ? (
+                <p role="status" className="text-sm text-[#686052]">
+                  {pendingAvatarPoses.length > 0
+                    ? `生成対象：${pendingAvatarPoses.map(({ label }) => label).join("・")}（${pendingAvatarPoses.length * AVATAR_FRAME_LABELS.length}枚）。`
+                    : selectedPoses.length > 0
+                      ? "選択中のポーズは生成済みです。変更したポーズだけを更新します。"
+                      : "生成するポーズを選択してください。"}
+                </p>
+              ) : null}
               <button
                 type="submit"
-                disabled={isGenerating}
+                disabled={!storageReady || isGenerating}
                 className="h-12 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-0.5 active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
               >
                 {isGenerating
@@ -1239,12 +1523,30 @@ export default function AvatarStudio() {
                     }生成中...`
                   : `${generationTargetLabel}生成`}
               </button>
+              {generationTarget === "avatar" &&
+                avatarPoses.some(({ id }) => id === activePoseGroupId) &&
+                selectedPoses.some(({ id }) => id === activePoseGroupId) ? (
+                <button
+                  type="button"
+                  disabled={!storageReady || isGenerating}
+                  onClick={() => void generateImages("avatar", activePoseGroupId)}
+                  className="min-h-10 rounded-lg border border-[#0891b2] bg-white px-4 py-2 text-sm font-bold text-[#075985] hover:bg-[#e6faff] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {activePoseGroup.label}だけ再生成
+                </button>
+              ) : null}
               {error ? (
                 <p className="rounded-md border border-[#f3b5b5] bg-[#fff1f1] px-3 py-2 text-sm leading-6 text-[#9b1c1c]">
                   {error}
                 </p>
               ) : null}
+              {storageError ? (
+                <p role="alert" className="rounded-md border border-[#f3b5b5] bg-[#fff1f1] px-3 py-2 text-sm leading-6 text-[#9b1c1c]">
+                  {storageError}
+                </p>
+              ) : null}
             </div>
+            </fieldset>
           </form>
 
           <section className="flex flex-col items-center gap-4">
@@ -1252,27 +1554,36 @@ export default function AvatarStudio() {
               <div
                 id="generated-image-panel"
                 role="tabpanel"
-                className="absolute inset-[7.333%] z-10 flex items-center justify-center overflow-hidden rounded-full border-10 border-[#22d3ee] bg-white shadow-md"
+                className={`absolute inset-[7.333%] z-10 flex items-center justify-center overflow-hidden rounded-full border-10 border-[#22d3ee] shadow-md ${
+                  IS_DEVELOPMENT && !isProductionUiPreview ? "bg-black" : "bg-white"
+                }`}
               >
                 {activeResult?.image ? (
                   activeResultView === "avatar" &&
                   avatarFrames.length === AVATAR_FRAME_LABELS.length ? (
-                    avatarFrames.map((frame, index) => (
-                      <Image
-                        key={`${AVATAR_FRAME_LABELS[index]}-${index}`}
-                        src={frame}
-                        alt={`生成したアバター（${AVATAR_FRAME_LABELS[index]}）`}
-                        fill
-                        sizes="(max-width: 640px) calc(100vw - 5rem), 512px"
-                        unoptimized
-                        aria-hidden={index !== activeAvatarFrameIndex}
-                        className={`object-contain ${
-                          index === activeAvatarFrameIndex
-                            ? "opacity-100"
-                            : "opacity-0"
-                        }`}
-                      />
-                    ))
+                    avatarPoses.flatMap((pose, poseIndex) =>
+                      pose.frames.map((frame, frameIndex) => {
+                        const isVisible =
+                          poseIndex === activeAvatarPoseIndex &&
+                          frameIndex === activeAvatarFrameIndex;
+
+                        return (
+                          <Image
+                            key={`${pose.id}-${frameIndex}`}
+                            src={frame}
+                            alt={`生成したアバター（${pose.label}・${AVATAR_FRAME_LABELS[frameIndex]}）`}
+                            fill
+                            sizes="(max-width: 640px) calc(100vw - 5rem), 512px"
+                            unoptimized
+                            loading="eager"
+                            aria-hidden={!isVisible}
+                            className={`object-contain ${
+                              isVisible ? "opacity-100" : "opacity-0"
+                            }`}
+                          />
+                        );
+                      }),
+                    )
                   ) : (
                     <Image
                       src={activeResult.image}
@@ -1284,9 +1595,15 @@ export default function AvatarStudio() {
                     />
                   )
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center px-10 text-center text-sm text-[#686f7b]">
+                  <div
+                    className={`flex h-full w-full items-center justify-center px-10 text-center text-sm ${
+                      IS_DEVELOPMENT && !isProductionUiPreview
+                        ? "text-white/70"
+                        : "text-[#686f7b]"
+                    }`}
+                  >
                     {generatingResultView === activeResultView
-                      ? `${activeResultLabel}を生成しています。`
+                      ? generationMessage
                       : activeResultView === "character"
                         ? "属性から生成した基本キャラクターがここに表示されます。"
                         : "ポーズから生成したアバターがここに表示されます。"}
@@ -1355,13 +1672,22 @@ export default function AvatarStudio() {
                 })}
               </div>
 
+              {activeResultView === "avatar" && activeAvatarPose ? (
+                <p className="text-xs font-semibold text-[#686052]">
+                  {activeAvatarPose.label}
+                  {avatarPoses.length > 1 && !isAvatarFrameInspectionPaused
+                    ? " · 4秒ごとにランダム切替"
+                    : null}
+                </p>
+              ) : null}
+
               {IS_DEVELOPMENT &&
               !isProductionUiPreview &&
               activeResult?.image &&
-              activeResult.provider ? (
+              activeImageProvider ? (
                 <span className="rounded-full border border-black/10 bg-[#fff7d6] px-2.5 py-1 text-[11px] font-bold text-[#62420e]">
-                  {activeResult.provider === "openai"
-                    ? "GPT Image 2"
+                  {activeImageProvider === "openai"
+                    ? "GPT Image 2.5 Sunburst"
                     : "Nano Banana 2"}
                 </span>
               ) : null}
@@ -1379,6 +1705,34 @@ export default function AvatarStudio() {
                       開発環境のみ
                     </span>
                   </div>
+
+                  {avatarPoses.length > 1 ? (
+                    <div
+                      role="group"
+                      aria-label="確認するアバターポーズ"
+                      className="mb-3 flex gap-2"
+                    >
+                      {avatarPoses.map((pose, index) => (
+                        <button
+                          key={pose.id}
+                          type="button"
+                          aria-pressed={activeAvatarPoseIndex === index}
+                          onClick={() => {
+                            setActiveAvatarPoseIndex(index);
+                            setSelectedAvatarFrameIndex(activeAvatarFrameIndex);
+                            setIsAvatarPreviewPlaying(false);
+                          }}
+                          className={`flex-1 rounded-lg border px-2 py-2 text-xs font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                            activeAvatarPoseIndex === index
+                              ? "border-[#0891b2] bg-[#22d3ee] text-[#083344]"
+                              : "border-black/10 bg-white text-[#403b35] hover:bg-[#e6faff]"
+                          }`}
+                        >
+                          {pose.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   <div
                     role="group"
