@@ -429,13 +429,13 @@ Voice関連は `/api/generate-speech`、`/api/voice-reference`、`/api/speaker-a
 
 | 実装 | 内容 |
 | --- | --- |
-| [avatar-studio.tsx](../app/avatar/avatar-studio.tsx) | キャラクターと差分UI |
-| [voice-studio.tsx](../app/voice/voice-studio.tsx) | 声作成・サンプル・学習UI |
-| [movie-studio.tsx](../app/movie/movie-studio.tsx) | アップロード・解析・変換UI |
-| [segment-editor.tsx](../app/movie/segment-editor.tsx) | 発言の編集 |
-| [server.py](../movie_worker/server.py) | Movie API、入力・所有者・編集検査 |
-| [analysis.py](../movie_worker/analysis.py) | 文字起こし・アライメント・Gemini・品質検査 |
-| [pipeline.py](../movie_worker/pipeline.py) | ジョブ進行・声固定・再生成・再試行 |
-| [media.py](../movie_worker/media.py) | メディア検査・時間補正・ミックス |
-| [store.py](../movie_worker/store.py) | SQLiteと所有者別ジョブ保存 |
-| [config.py](../movie_worker/config.py) | 上限・モデル・発声制御 |
+| [avatar-studio.tsx](../web/app/avatar/avatar-studio.tsx) | キャラクターと差分UI |
+| [voice-studio.tsx](../web/app/voice/voice-studio.tsx) | 声作成・サンプル・学習UI |
+| [movie-studio.tsx](../web/app/movie/movie-studio.tsx) | アップロード・解析・変換UI |
+| [segment-editor.tsx](../web/app/movie/segment-editor.tsx) | 発言の編集 |
+| [server.py](../gpu/movie_worker/server.py) | Movie API、入力・所有者・編集検査 |
+| [analysis.py](../gpu/movie_worker/analysis.py) | 文字起こし・アライメント・Gemini・品質検査 |
+| [pipeline.py](../gpu/movie_worker/pipeline.py) | ジョブ進行・声固定・再生成・再試行 |
+| [media.py](../gpu/movie_worker/media.py) | メディア検査・時間補正・ミックス |
+| [store.py](../gpu/movie_worker/store.py) | SQLiteと所有者別ジョブ保存 |
+| [config.py](../gpu/movie_worker/config.py) | 上限・モデル・発声制御 |

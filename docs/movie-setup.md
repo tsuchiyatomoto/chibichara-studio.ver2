@@ -1,6 +1,6 @@
 # Movieの起動と検証
 
-MovieはNext.jsと別のPythonサービスで動く。初期構成はWindowsの単一PC、ローカルディスク、RTX 3080 10GB。文字起こし・日本語alignmentはCPUで動かし、既存IrodoriのPython環境を変更しない。
+MovieはNext.jsと別のPythonサービスで動く。Next.jsは `web/`、Movieは `gpu/movie_worker/`、Irodoriは `gpu/irodori/` に配置する。初期構成はWindowsの単一PC、ローカルディスク、RTX 3080 10GB。文字起こし・日本語alignmentはCPUで動かし、既存IrodoriのPython環境を変更しない。
 
 入力は最大60分のMP4。ゲーム音と実況音声に独立した2本以上の音声トラックが必要。
 
@@ -8,8 +8,8 @@ MovieはNext.jsと別のPythonサービスで動く。初期構成はWindowsの�
 
 1. Python 3.12、FFmpeg、ffprobeを用意する。
 2. `npm run movie:setup` で `.movie-venv` に固定した依存関係をインストールする。
-3. `.env.local` にVertex AIの既存認証設定と `GEMINI_AUDIO_MODEL` を設定する。モデルは実際のプロジェクトで利用可能な音声入力・JSON出力対応モデルを指定する。
-4. Irodoriサーバーへ下記の小さな拡張を適用し、再起動する。
+3. `gpu/.env.local` にVertex AIの既存認証設定と `GEMINI_AUDIO_MODEL` を設定する。モデルは実際のプロジェクトで利用可能な音声入力・JSON出力対応モデルを指定する。Next.jsの接続先・トークンは `web/.env.local` に設定する。
+4. `npm run tts:start` で同梱の改修済みIrodoriサーバーを起動する。
 5. `npm run movie:start`、`npm run dev` をそれぞれ起動し、`http://localhost:3000/movie` を開く。
 
 初回の解析ではfaster-whisper large-v3と日本語CTCモデルを取得するため、時間と数GBのディスク容量が必要。Movieを閉じても処理は継続するが、PCやサービスの停止中は処理できない。サービス再起動時に未完了工程を再開する。
@@ -18,24 +18,17 @@ MovieはNext.jsと別のPythonサービスで動く。初期構成はWindowsの�
 
 ## Irodori拡張
 
-対象は既存の所有者別資産APIを含むサーバーのローカルrevision `3316cef87c11f2f5b2b805f9bf603d6440bf758e`。公式リポジトリだけでは既存のVoice拡張が不足するため、このrevisionを含むサーバーを別途保存・配布する必要がある。
+既存の所有者別資産APIを含むローカルrevision `3316cef87c11f2f5b2b805f9bf603d6440bf758e` と、Movie拡張を適用したソースを `gpu/irodori/` に同梱している。取り込み元と変更内容は [UPSTREAM.md](../gpu/irodori/UPSTREAM.md) を参照する。`irodori-movie-snapshot.patch` は旧構成用の履歴として残しており、同梱ソースへ再適用しない。
 
-`irodori-movie-snapshot.patch` はこのrevisionからの差分。サーバーのルートで次を実行する。
+追加APIは `GET /v1/audio/voice-assets/{id}/content`。既存と同じ認証・所有者検査を行い、資産ストアのロック内でモデルのバイト列を取得する。声の置換・期限削除と競合して読み取り途中のファイルが消えることを防ぐ。
 
-```powershell
-git apply --check C:/dev/chibichara-studio.ver2/docs/irodori-movie-snapshot.patch
-git apply C:/dev/chibichara-studio.ver2/docs/irodori-movie-snapshot.patch
-```
-
-既に適用済みなら再適用しない。追加APIは `GET /v1/audio/voice-assets/{id}/content`。既存と同じ認証・所有者検査を行い、資産ストアのロック内でモデルのバイト列を取得する。声の置換・期限削除と競合して読み取り途中のファイルが消えることを防ぐ。
-
-Movieは取得したモデルをジョブ専用ディレクトリへ保存し、サーバーにその `ref_embed` パスを送る。したがって現バージョンではTTSとMovieが同じファイルシステムを参照する必要がある。遠隔TTS・サーバーレス環境にはそのまま配置できない。VoiceのUIと新規生成リクエストは変更しない。
+Movieは取得したモデルをジョブ専用ディレクトリへ保存し、サーバーにその `ref_embed` パスを送る。したがって現バージョンではTTSとMovieが同じファイルシステムを参照する必要がある。RunPodでは同じPod内で同一の絶対パスを参照させる。別マシンのTTS・サーバーレス環境にはそのまま配置できない。
 
 ## 保存と認証
 
 - 非公開 `.movie-data` にSQLite WAL、動画、音声、モデルスナップショットを保存する。Gitには含めない。
 - Next.jsの既存所有者cookieを使う。Movieサービスはループバックで待ち受け、Next.jsが秘密トークンと所有者を付与する。ブラウザからサービスへ直接アクセスさせない。
-- `MOVIE_DATA_DIR` を変更する場合は両サービスで同じ絶対パスを指定する。トークンはその中の `service.token` を共用するか、同じ `MOVIE_WORKER_TOKEN` を設定する。
+- `.movie-data` の既定位置はリポジトリ直下で、フォルダ整理前と同じ。`MOVIE_DATA_DIR` を変更する場合はNext.jsとMovieで同じ絶対パスを指定する。遠隔配置ではNext.jsとMovieに同じ `MOVIE_WORKER_TOKEN` を設定する。
 - OSのファイルロックでワーカーの重複起動を防ぐ。uvicornのworkersは1。ロックが取得できない場合は起動しない。
 - 動画は8MiBチャンクで送信。位置とhashを照合し再送を重複保存しない。公開ダウンロードは所有者検査とRangeに対応する。
 - 完了・中止・失敗・アップロード待ち・確認待ちのファイルは最終更新から24時間で削除する。実行中は削除しない。学習済み声モデル本体は削除しない。
@@ -58,7 +51,7 @@ npm run build
 
 Movieテストは実FFmpegを使用する。AIサービスの代わりに固定応答を使う統合テストと、アップロード再開、所有者境界、発言境界、編集競合、時間補正、元実況が混ざらない出力、Range取得、中止、永続保存を含む。実際の感情再現度・機械的ノイズの有無は別途試聴が必要。
 
-60分のメディア検証は `$env:MOVIE_LONG_TEST='1'; npm run movie:test` で有効になる。UIテストはNext.jsとMovieを起動した状態で `npx playwright test tests/movie-ui.spec.ts --workers=1` を実行する（初回は `npx playwright install chromium`）。
+60分のメディア検証は `$env:MOVIE_LONG_TEST='1'; npm run movie:test` で有効になる。UIテストはNext.jsとMovieを起動した状態で `web/` に移動してから `npx playwright test tests/movie-ui.spec.ts --workers=1` を実行する（初回は `npx playwright install chromium`）。
 
 2026-09-15の確認結果：通常のMovieテスト15件、Irodori回帰73件、ブラウザ操作1件が成功。別実行の30分検証用MP4も成功し、出力の長さ・映像フレーム数を確認した。既存の約5.6秒の合成音声から実ASR・日本語alignment・Gemini解析・保存モデルでのIrodori生成まで動作し、生成後の読みを再解析して一致を確認した。実実況30分全体の生成と、人による感情・音質評価はこの検証には含めていない。
 
@@ -96,7 +89,7 @@ Geminiの音声入力は[公式の音声理解ドキュメント](https://ai.goo
 
 ### その他
 
-- アバターのポーズは、生成された実況音声で2秒以上の無言が続いた後、次の発声が始まった時に別のポーズへ切り替える（10fps、0.1秒単位）。発言中・無言中・冒頭の最初の発声では維持する。配置プレビューは音声生成前のためポーズを固定する。変更の適用にはMovieワーカーを再起動して動画を書き出し直す。無言の基準は `movie_worker/media.py` の `POSE_SILENCE_SECONDS` で調整できる。
+- アバターのポーズは、生成された実況音声で2秒以上の無言が続いた後、次の発声が始まった時に別のポーズへ切り替える（10fps、0.1秒単位）。発言中・無言中・冒頭の最初の発声では維持する。配置プレビューは音声生成前のためポーズを固定する。変更の適用にはMovieワーカーを再起動して動画を書き出し直す。無言の基準は `gpu/movie_worker/media.py` の `POSE_SILENCE_SECONDS` で調整できる。
 - 同じ発声開始時に、中心位置を保ったままアバターを100% → 110% → 100%へ拡大・縮小する。0.1秒で拡大し、0.2秒で元に戻す（アニメーション計算は30fps、完成映像のフレームレートに合わせて表示）。ポーズが1種類の場合も動作する。スケール動作は完成MP4に焼き込み、音声生成前の配置プレビューでは行わない。長さと最大倍率は `AVATAR_SCALE_SECONDS`、`AVATAR_SCALE_PEAK` で調整できる。
 - 一人の日本語実況を対象とし、混合済み音声の分離はしない。
 - 笑い・悲鳴・ため息などの非言語発声は種類を判定してIrodoriで再生成し、生成結果にも同じ発声が自然に含まれるかGeminiで検査する。未整列文字、解析不一致、生成検査の失敗は該当発言を自動無音化する。出力はIrodori生成音声または無音だけを許可し、元実況音声へ切り替える機能は提供しない。

@@ -1,0 +1,8 @@
+services:
+  api:
+    gpus: all
+    environment:
+      IRODORI_MODEL_DEVICE: cuda
+      IRODORI_CODEC_DEVICE: cuda
+      IRODORI_MODEL_PRECISION: bf16
+      IRODORI_CODEC_PRECISION: bf16

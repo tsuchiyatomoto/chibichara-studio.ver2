@@ -2,6 +2,27 @@
 
 Next.js app for creating chibi avatars and synthesizing Japanese speech.
 
+## Repository layout
+
+```text
+web/                 Next.js application and web tests (Render)
+gpu/irodori/         Bundled, locally customized Irodori-TTS-Server
+gpu/movie_worker/    Movie analysis and export service
+gpu/toonout_worker/  Avatar background-removal service
+scripts/local/       Windows development and service launchers
+docs/                Product and setup documentation
+```
+
+`web/` is an independent Node application. The three Python services are grouped
+under `gpu/` for the planned RunPod deployment. Repository-level npm commands
+continue to work and delegate to the appropriate directory. See
+[Web setup](web/README.md) and [GPU services](gpu/README.md).
+
+For the combined GPU container, see [RunPod Docker setup](docs/runpod-docker.md).
+
+Existing `.movie-data/`, `.toonout-data/`, the new `.speech-jobs/`, logs, and Python environments remain
+outside the source directories. Credentials and saved user data are not tracked.
+
 Movie supports uploading a two-audio-track MP4, utterance-level Japanese analysis,
 Gemini expression analysis, Irodori resynthesis, and mixed MP4 export.
 See [Movie setup](docs/movie-setup.md) and [requirements](docs/movie-requirements.md).
@@ -11,10 +32,12 @@ See [Movie setup](docs/movie-setup.md) and [requirements](docs/movie-requirement
 Install dependencies:
 
 ```bash
-npm.cmd install
+npm.cmd run setup:web
 ```
 
-Create `.env.local` from the example and set your OpenAI key, Google Cloud project, and credential path:
+Create `web/.env.local` from `web/.env.example` and set your OpenAI key,
+Google Cloud project, and credential path. Create `gpu/.env.local` from
+`gpu/.env.example` for Movie and ToonOut settings:
 
 ```env
 OPENAI_API_KEY=your-openai-api-key
@@ -25,7 +48,6 @@ GOOGLE_APPLICATION_CREDENTIALS=C:/path/to/service-account-key.json
 GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
 IRODORI_TTS_BASE_URL=http://127.0.0.1:8088
 IRODORI_TTS_MODEL=irodori-tts
-IRODORI_TTS_TIMEOUT_MS=900000
 ```
 
 Run the dev server:
@@ -75,7 +97,7 @@ ports, and print the process ID and both log paths. Existing foreground commands
 continue to write to the terminal. Direct diagnostic script output to
 `logs/diagnostics/`. Keep `.out.log` and `.err.log` pairs together; old logs retain
 their original filenames. Next.js manages its own internal log separately at
-`.next/dev/logs/next-development.log`.
+`web/.next/dev/logs/next-development.log`.
 
 ## Irodori-TTS
 
@@ -84,15 +106,25 @@ The Voice page calls the official OpenAI-compatible
 server-side `/api/generate-speech` route. The inference URL and optional API key
 are never sent to the browser.
 
-On the current Windows development machine, the server is installed in the
-sibling `Irodori-TTS-Server` directory. Start it in a separate terminal:
+Speech generation now creates a persistent job and returns `202` immediately.
+The UI polls for status and downloads the finished WAV separately. The same
+pattern is used for Avatar background removal. See
+[Job API and recovery](docs/async-jobs.md) for HTTP limits, resume behavior,
+ownership, and retention. The synchronous TTS endpoint remains for Pod-local
+Movie requests.
+
+The customized server source is included in `gpu/irodori/`. Start it in a
+separate terminal:
 
 ```powershell
 npm.cmd run tts:start
 ```
 
 Keep that terminal open while using the Voice page. Press `Ctrl+C` to stop the
-server. The start script also disables the Hugging Face Xet transfer path that
+server. On the current Windows machine, the launcher reuses the original
+sibling `Irodori-TTS-Server` virtual environment, settings, and saved voice data,
+while loading the bundled source. See [GPU services](gpu/README.md) for overrides.
+The start script also disables the Hugging Face Xet transfer path that
 can stall large model downloads on this Windows environment.
 
 The start script sets Speaker Inversion to 3000 training steps. Override it with
@@ -105,11 +137,10 @@ To stop a server that is already running in the background:
 npm.cmd run tts:stop
 ```
 
-For a fresh machine, install Irodori-TTS-Server on port `8088` first:
+For a fresh machine, install the bundled Irodori-TTS-Server on port `8088` first:
 
 ```powershell
-git clone https://github.com/Aratako/Irodori-TTS-Server.git
-Set-Location Irodori-TTS-Server
+Set-Location gpu/irodori
 uv sync --extra cu128
 Copy-Item .env.example .env
 uv run --no-sync python -m irodori_openai_tts --host 127.0.0.1 --port 8088
@@ -170,5 +201,5 @@ script. A local uv git checkout is detected automatically, or set
 - The speech generation proxy runs server-side at `/api/generate-speech`.
 - Movie's 「音声解析の診断ログ」 panel shows Gemini audio request timings, original/trimmed clip bounds, attempts, and error responses, including failures followed by a successful retry. Each job retains `audio-analysis.jsonl`, available through an owner-scoped download; failed attempts also appear in `logs/movie/*.err.log` as `audio_analysis_request` when using `npm run movie:background`. Restart the Movie worker to enable recording for new requests. See [Movie diagnostics](docs/movie-setup.md#音声解析エラーの確認).
 - Speaker Inversion uses a persistent TTS-side background job; closing the page does not stop it.
-- Keep service account JSON files out of git. The `secrets/` directory and `.env.local` are ignored.
+- Keep service account JSON files out of git. The `secrets/` directory and all `.env.local` files are ignored. Development Vertex images use `web/.env.local`; Movie audio analysis uses `gpu/.env.local`.
 - `GEMINI_IMAGE_MODEL` defaults to `gemini-3.1-flash-image`.

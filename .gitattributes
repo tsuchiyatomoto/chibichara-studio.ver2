@@ -1,1 +1,4 @@
 *.patch -whitespace
+*.sh text eol=lf
+gpu/Dockerfile text eol=lf
+gpu/docker/*.conf text eol=lf
