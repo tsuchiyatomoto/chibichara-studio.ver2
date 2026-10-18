@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadAvatarSession } from "../avatar/avatar-storage";
+import { loadVoiceSession } from "../voice/voice-storage";
 import MoviePlayer from "./movie-player";
 import {
   ACTIVE,
@@ -23,6 +24,11 @@ type StoredAvatarImages = {
   }>;
 };
 
+type StoredVoiceIdentity = {
+  version: 1;
+  speakerJob?: { result?: { saved?: boolean; saved_asset_id?: string | null } | null } | null;
+};
+
 export default function MovieStudio() {
   const [health, setHealth] = useState<Health | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -36,6 +42,9 @@ export default function MovieStudio() {
   const [glossary, setGlossary] = useState("");
   const [savedAvatarPoses, setSavedAvatarPoses] = useState<MovieAvatarPose[]>([]);
   const [avatarReady, setAvatarReady] = useState(false);
+  const [voiceReady, setVoiceReady] = useState(false);
+  const [savedVoiceAssetId, setSavedVoiceAssetId] = useState<string | null>(null);
+  const voiceAvailable = !!health?.voice_available && !!savedVoiceAssetId;
   const [avatarPlacement, setAvatarPlacement] = useState<AvatarPlacement>(DEFAULT_PLACEMENT);
   const pauseUpload = useRef(false);
   const [localMedia, setLocalMedia] = useState<{ jobId: string; url: string } | null>(null);
@@ -55,6 +64,20 @@ export default function MovieStudio() {
       })
       .catch(() => {})
       .finally(() => { if (live) setAvatarReady(true); });
+    return () => { live = false; };
+  }, []);
+  useEffect(() => {
+    let live = true;
+    loadVoiceSession<StoredVoiceIdentity>()
+      .then((session) => {
+        if (!live || session?.version !== 1) return;
+        const result = session.speakerJob?.result;
+        if (result?.saved && typeof result.saved_asset_id === "string" && result.saved_asset_id) {
+          setSavedVoiceAssetId(result.saved_asset_id);
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (live) setVoiceReady(true); });
     return () => { live = false; };
   }, []);
   useEffect(() => {
@@ -172,7 +195,7 @@ export default function MovieStudio() {
   async function attachAvatar(current: Job) {
     const existing = current.avatar?.poses ?? [];
     const source = existing.length ? existing : savedAvatarPoses;
-    if (!source.length) return current;
+    if (!source.length) throw new Error("Avatarでアバターを生成・保存してからMovieを開始してください。");
     const poses: MovieAvatarPose[] = [];
     for (let poseIndex = 0; poseIndex < source.length; poseIndex++) {
       const pose = source[poseIndex];
@@ -204,7 +227,11 @@ export default function MovieStudio() {
     });
   }
   async function startAnalysis() {
-    if (!job) return;
+    if (!job || busy || uploading || running || !avatarReady || !voiceReady) return;
+    if (!voiceAvailable) {
+      setError("Voiceでボイスモデルを生成・保存してからMovieを開始してください。");
+      return;
+    }
     await action(async () => {
       const prepared = await attachAvatar(job);
       return post(`jobs/${prepared.id}/analyze`, {
@@ -216,6 +243,11 @@ export default function MovieStudio() {
   }
   async function upload(file?: File) {
     if (!file || uploading || busy || running) return;
+    if (!avatarReady || !voiceReady || !health) return;
+    if (!voiceAvailable || !savedAvatarPoses.length) {
+      setError("Voiceでボイスモデルを、Avatarでアバターを生成・保存してから動画を選択してください。");
+      return;
+    }
     if (
       !file.name.toLowerCase().endsWith(".mp4") ||
       !file.size ||
@@ -325,10 +357,12 @@ export default function MovieStudio() {
       key={job?.id ?? "empty"}
       job={job}
       jobs={jobs}
-      health={health}
+      health={health ? { ...health, voice_available: voiceAvailable } : null}
       error={error}
-      busy={busy || loading || !avatarReady}
+      busy={busy || loading || !avatarReady || !voiceReady}
       uploading={uploading}
+      assetsReady={avatarReady && voiceReady}
+      hasSavedAvatar={savedAvatarPoses.length > 0}
       localVideoUrl={localMedia?.jobId === job?.id ? localMedia?.url : undefined}
       avatarPoses={(job?.avatar?.poses ?? savedAvatarPoses).map((pose) => ({
         ...pose,

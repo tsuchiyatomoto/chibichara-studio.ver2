@@ -9,6 +9,8 @@ import { getScopedIrodoriHeaders } from "../_lib/voice-owner";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const ASSET_ID_PATTERN = /^vasset_[a-f0-9]{32}$/;
+
 export async function GET() {
   try {
     const response = await fetchIrodori(
@@ -37,6 +39,45 @@ export async function GET() {
       process.env.NODE_ENV === "development"
         ? getErrorMessage(error)
         : undefined,
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  let voiceAssetId = "";
+  try {
+    const body = await request.json() as { voiceAssetId?: unknown };
+    voiceAssetId = typeof body.voiceAssetId === "string" ? body.voiceAssetId : "";
+  } catch {
+    return apiError("削除するボイスモデルIDが必要です。", 400);
+  }
+  if (!ASSET_ID_PATTERN.test(voiceAssetId)) {
+    return apiError("ボイスモデルIDが正しくありません。", 400);
+  }
+
+  try {
+    const response = await fetchIrodori(
+      `/v1/audio/voice-assets/${encodeURIComponent(voiceAssetId)}`,
+      { method: "DELETE", headers: await getScopedIrodoriHeaders() },
+    );
+    if (!response.ok && response.status !== 404) {
+      return apiError(
+        "ボイスモデルの削除に失敗しました。もう一度お試しください。",
+        response.status,
+        process.env.NODE_ENV === "development"
+          ? await getIrodoriErrorDetail(response)
+          : undefined,
+      );
+    }
+    return Response.json(
+      { deleted: true, voiceAssetId },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (error) {
+    return apiError(
+      "音声サーバーに接続できず、ボイスモデルを削除できませんでした。もう一度お試しください。",
+      503,
+      process.env.NODE_ENV === "development" ? getErrorMessage(error) : undefined,
     );
   }
 }

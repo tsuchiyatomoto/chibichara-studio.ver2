@@ -23,6 +23,8 @@ type Props = {
   uploading: boolean;
   localVideoUrl?: string;
   avatarPoses: MovieAvatarPose[];
+  assetsReady: boolean;
+  hasSavedAvatar: boolean;
   avatarPlacement: AvatarPlacement;
   avatarSeed: number;
   settings: Settings;
@@ -69,7 +71,7 @@ function Overlay({ title, onClose, children }: { title: string; onClose: () => v
 }
 
 export default function MoviePlayer({
-  job, jobs, health, error, busy, uploading, localVideoUrl, avatarPoses, avatarPlacement, avatarSeed, settings,
+  job, jobs, health, error, busy, uploading, localVideoUrl, avatarPoses, assetsReady, hasSavedAvatar, avatarPlacement, avatarSeed, settings,
   onUpload, onPauseUpload, onSelectJob, onDeleteJob, onAnalyze, onConvert, onCancel, onResume, onAvatarPlacementChange,
 }: Props) {
   const input = useRef<HTMLInputElement>(null);
@@ -85,6 +87,11 @@ export default function MoviePlayer({
   const dragDepth = useRef(0);
   const running = !!job && ACTIVE.has(job.state);
   const locked = busy || uploading || running;
+  const checkingAssets = !health || !assetsReady;
+  const missingVoice = !health?.voice_available;
+  const missingAvatar = !hasSavedAvatar;
+  const hasUploadAssets = !checkingAssets && !missingVoice && !missingAvatar;
+  const canUpload = !locked && hasUploadAssets;
   const completed = job?.state === "completed";
   const reviewing = job?.state === "ready" && !!job.media;
   const playable = completed || reviewing;
@@ -101,7 +108,7 @@ export default function MoviePlayer({
     ? <Link href="/voice">Voiceで声を保存する →</Link>
     : "Voiceで保存した声を使用";
   const message = error || job?.error;
-  const chooseFile = () => input.current?.click();
+  const chooseFile = () => { if (canUpload && !panel) input.current?.click(); };
 
   return (
     <main className={styles.page}>
@@ -118,9 +125,9 @@ export default function MoviePlayer({
           event.preventDefault();
           if (!event.dataTransfer.types.includes("Files")) return;
           dragDepth.current++;
-          if (!locked && health && !panel) setDragging(true);
+          if (canUpload && !panel) setDragging(true);
         }}
-        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = locked || panel || !health ? "none" : "copy"; }}
+        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = !canUpload || panel ? "none" : "copy"; }}
         onDragLeave={(event) => {
           event.preventDefault();
           dragDepth.current = Math.max(0, dragDepth.current - 1);
@@ -130,7 +137,7 @@ export default function MoviePlayer({
           event.preventDefault();
           dragDepth.current = 0;
           setDragging(false);
-          if (!locked && health && !panel) void onUpload(event.dataTransfer.files[0]);
+          if (canUpload && !panel) void onUpload(event.dataTransfer.files[0]);
         }}
       >
         {videoUrl && (
@@ -191,36 +198,59 @@ export default function MoviePlayer({
               {reviewing && (
                 <button
                   className={`${styles.primary} ${styles.headerAction}`}
-                  disabled={locked || !health?.voice_available || !health.gemini_configured}
+                  disabled={locked || !health?.voice_available || !avatarPoses.length || !health.gemini_configured}
                   onClick={() => { setAvatarEditing(false); onAnalyze(); }}
                   title={!health?.voice_available
                     ? "Voiceで声を保存してください"
-                    : !health.gemini_configured
-                      ? "音声解析の接続設定が必要です"
-                      : "確認した動画の変換を開始"}
+                    : !avatarPoses.length
+                      ? "Avatarでアバターを生成・保存してください"
+                      : !health.gemini_configured
+                        ? "音声解析の接続設定が必要です"
+                        : "確認した動画の変換を開始"}
                 >
                   変換を開始
                 </button>
               )}
-              {job && <button className={styles.iconButton} onClick={chooseFile} disabled={locked || !health} aria-label="別のMP4を選択" title="別のMP4を選択"><Icon name="upload" /></button>}
+              {job && <button className={styles.iconButton} onClick={chooseFile} disabled={!canUpload} aria-label="別のMP4を選択" title="別のMP4を選択"><Icon name="upload" /></button>}
               <button className={styles.iconButton} onClick={(event) => { panelTrigger.current = event.currentTarget; setPanel("history"); }} disabled={busy || uploading} aria-label="最近の動画" title="最近の動画"><Icon name="history" /></button>
               <button className={styles.iconButton} onClick={(event) => { panelTrigger.current = event.currentTarget; setPanel("details"); }} disabled={busy || uploading} aria-label="設定・詳細" title="設定・詳細"><Icon name="settings" /></button>
             </div>
           </header>
-          <input ref={input} type="file" accept="video/mp4,.mp4" className={styles.fileInput} aria-label="MP4ファイル" disabled={locked || !health} onChange={(event) => {
+          <input ref={input} type="file" accept="video/mp4,.mp4" className={styles.fileInput} aria-label="MP4ファイル" disabled={!canUpload} onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            void onUpload(file);
+            if (canUpload && !panel) void onUpload(file);
           }} />
           {message && <p role="alert" className={styles.error}>{message}</p>}
           <div className={styles.body}>
-            {!job && (
+            {(!job || job.state === "expired") && (
               <div className={styles.empty}>
-                <span className={styles.uploadIcon}><Icon name="upload" /></span>
-                <h1>動画をここにドロップ</h1>
-                <p>あなたのキャラクターの声で、実況をつくる。</p>
-                <button className={styles.primary} disabled={locked || !health} onClick={chooseFile}>MP4を選択</button>
-                <small>ゲーム音と実況音が別トラックのMP4</small>
+                {checkingAssets ? (
+                  <h1>Movieの準備を確認しています…</h1>
+                ) : missingVoice || missingAvatar ? (
+                  <>
+                    <h1>{missingVoice && missingAvatar
+                      ? "ボイスモデルとアバターを作成してください"
+                      : missingVoice ? "ボイスモデルを作成してください" : "アバターを作成してください"}</h1>
+                    <p>{missingVoice && missingAvatar
+                      ? "Voiceでボイスモデルを、Avatarでポーズ付きアバターを生成・保存してください。"
+                      : missingVoice
+                        ? "Voiceでボイスモデルを生成・保存すると、Movieを開始できます。"
+                        : "Avatarでポーズ付きアバターを生成・保存すると、Movieを開始できます。"}</p>
+                    <div className={styles.preparationLinks}>
+                      {missingVoice && <Link className={styles.primary} href="/voice">ボイスモデルを作成</Link>}
+                      {missingAvatar && <Link className={missingVoice ? styles.secondary : styles.primary} href="/avatar">アバターを作成</Link>}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className={styles.uploadIcon}><Icon name="upload" /></span>
+                    <h1>{job?.state === "expired" ? "動画の保存期限が終了しました" : "動画をここにドロップ"}</h1>
+                    <p>あなたのキャラクターの声で、実況をつくる。</p>
+                    <button className={styles.primary} disabled={!canUpload} onClick={chooseFile}>MP4を選択</button>
+                    <small>ゲーム音と実況音が別トラックのMP4</small>
+                  </>
+                )}
               </div>
             )}
             {job && (running || job.state === "uploading") && (
@@ -232,7 +262,7 @@ export default function MoviePlayer({
                   <span className={running && !progress ? styles.indeterminate : ""} style={{ width: `${Math.max(3, progress)}%` }} />
                 </div>
                 {uploading ? <button className={styles.secondary} onClick={onPauseUpload}>アップロードを一時停止</button>
-                  : job.state === "uploading" ? <button className={styles.primary} disabled={busy || !health} onClick={chooseFile}>同じMP4を選択して再開</button>
+                  : job.state === "uploading" ? <button className={styles.primary} disabled={!canUpload} onClick={chooseFile}>同じMP4を選択して再開</button>
                     : <button className={styles.secondary} disabled={busy || job.state === "cancelling"} onClick={onCancel}>処理を中止</button>}
                 {running && <small>画面を閉じても処理は続きます</small>}
               </div>
@@ -252,7 +282,6 @@ export default function MoviePlayer({
                 <button className={styles.primary} disabled={busy} onClick={onResume}>未完了の工程から再開</button>
               </div>
             )}
-            {job?.state === "expired" && <div className={styles.center}><h2>動画の保存期限が終了しました</h2><button className={styles.primary} onClick={chooseFile} disabled={locked || !health}>MP4を選択</button></div>}
           </div>
           <footer className={styles.footer}>
             {completed && job ? <>
@@ -263,11 +292,13 @@ export default function MoviePlayer({
             </>}
           </footer>
         </div>
-        {dragging && <div className={styles.dropOverlay}><Icon name="upload" /><p>ここにドロップしてアップロード</p></div>}
+        {dragging && canUpload && <div className={styles.dropOverlay}><Icon name="upload" /><p>ここにドロップしてアップロード</p></div>}
         {panel && <Overlay title={panel === "history" ? "最近の動画" : "設定・詳細"} onClose={() => setPanel(null)}>
           {message && <p role="alert" className={styles.error}>{message}</p>}
           {panel === "history" ? <>
-            {!jobs.length && <p className={styles.hint}>まだ動画はありません。MP4を選んで始めてください。</p>}
+            {!jobs.length && <p className={styles.hint}>{hasUploadAssets
+              ? "まだ動画はありません。MP4を選んで始めてください。"
+              : "まだ動画はありません。VoiceとAvatarで準備すると、動画を追加できます。"}</p>}
             <div className={styles.history}>
               {jobs.map((item) => <div key={item.id} className={styles.historyRow}>
                 <button disabled={busy || uploading} onClick={async () => { await onSelectJob(item.id); setPanel(null); }} aria-current={item.id === job?.id ? "true" : undefined}>

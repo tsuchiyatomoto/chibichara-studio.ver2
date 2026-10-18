@@ -2,12 +2,19 @@ import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { saveMovieAvatar, saveMovieVoice } from "./movie-fixtures";
 
 test("Movie uploads two tracks, resumes after reload, and scopes private media", async ({
   page,
   browser,
 }) => {
   test.setTimeout(90000);
+  const status = await page.request.get("http://localhost:3000/api/movie/health");
+  test.skip(!status.ok() || !(await status.json()).voice_available,
+    "Requires a running Movie/TTS service with a saved voice model.");
+  await saveMovieAvatar(page);
+  const voices = await (await page.request.get("http://localhost:3000/api/speaker-assets")).json();
+  await saveMovieVoice(page, voices.data[0].id);
   const directory = path.resolve(".movie-data/ui-check");
   mkdirSync(directory, { recursive: true });
   const input = path.join(directory, "two-tracks.mp4");

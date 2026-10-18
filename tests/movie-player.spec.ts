@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { Job } from "../app/movie/movie-types";
+import { saveMovieAvatar, saveMovieVoice } from "./movie-fixtures";
 
 const health = { voice_available: true, tts_ready: true, gemini_configured: true, max_bytes: 1024 ** 3, chunk_bytes: 8 * 1024 ** 2 };
 const baseJob: Job = {
@@ -39,6 +40,10 @@ test("one video box previews the upload before fixed-track conversion and downlo
     } else if (path.endsWith("/analyze")) {
       analyzeBody = request.postDataJSON();
       job = { ...job!, state: "analyzing" };
+    } else if (path.includes("/avatar-assets/")) {
+      return route.fulfill({ json: { name: path.split("/").at(-1) } });
+    } else if (path.endsWith("/avatar")) {
+      job = { ...job!, avatar: request.postDataJSON() };
     } else if (path.endsWith("/convert")) {
       convertBody = request.postDataJSON();
       job = { ...job!, ...request.postDataJSON(), state: "synthesizing", progress: 25 };
@@ -53,6 +58,8 @@ test("one video box previews the upload before fixed-track conversion and downlo
     }
     return route.fulfill({ json: job });
   });
+  await saveMovieAvatar(page);
+  await saveMovieVoice(page);
   await page.goto("/movie");
   const box = page.getByRole("region", { name: "Movie 動画ボックス" });
   await expect(box.getByRole("button", { name: "MP4を選択", exact: true })).toBeEnabled();
@@ -159,7 +166,7 @@ test("saved Avatar can be placed freely and is snapshotted before analysis", asy
     }
     return route.fulfill({ status: 404, json: { error: path } });
   });
-  await page.goto("/");
+  await saveMovieVoice(page);
   await page.evaluate(async ({ id, dataUrl }) => {
     localStorage.setItem("movie-current", id);
     await new Promise<void>((resolve, reject) => {
@@ -262,7 +269,7 @@ test("history and failure recovery stay inside the video box on mobile", async (
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await box.getByRole("button", { name: "最近の動画" }).click();
   await box.getByRole("button", { name: "playthrough.mp4を削除" }).click();
-  await expect(box.getByRole("heading", { name: "動画をここにドロップ" })).toBeVisible();
+  await expect(box.getByRole("heading", { name: "アバターを作成してください" })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("movie-current"))).toBeNull();
   await page.screenshot({ path: testInfo.outputPath("empty-mobile.png") });
 });

@@ -86,6 +86,120 @@ async function storedAvatarImages(page: Page) {
   });
 }
 
+async function prepareVoiceNavigation(page: Page) {
+  await page.route("**/api/generate-speech", (route) => route.fulfill({ json: {
+    connected: true, speakerInversion: { ready: true, min_samples: 5 },
+  } }));
+}
+
+async function navigateToStudio(page: Page, studio: "Avatar" | "Voice") {
+  await page.getByRole("navigation", { name: "制作機能", exact: true })
+    .getByRole("link", { name: studio, exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/${studio.toLowerCase()}$`));
+}
+
+test("avatar generation keeps progress and edited settings across page navigation without duplicate requests", async ({ page }) => {
+  let finishFrame!: () => void;
+  const pendingFrame = new Promise<void>((resolve) => { finishFrame = resolve; });
+  const requests = await prepareAvatar(page, -1, async (index) => {
+    if (index === 2) await pendingFrame;
+  });
+  await prepareVoiceNavigation(page);
+  await selectPose(page, 2, "両手ピース");
+  await selectPose(page, 3, "ガッツポーズ");
+  await page.getByRole("button", { name: "アバター生成", exact: true }).click();
+  try {
+    await expect.poll(() => requests.length).toBe(3);
+    await selectPose(page, 3, "サムズアップ");
+    await navigateToStudio(page, "Voice");
+    await navigateToStudio(page, "Avatar");
+    await expect(page.getByRole("status")).toHaveText("ポーズ1を生成しています（2 / 12枚）。");
+    await expect(page.getByRole("button", { name: "アバター生成中...", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "サムズアップ", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.locator("main form").dispatchEvent("submit");
+    expect(requests).toHaveLength(3);
+  } finally {
+    finishFrame();
+  }
+  await expect(page.getByRole("button", { name: "アバター生成", exact: true })).toBeEnabled();
+  await expect(page.locator("#generated-image-panel img")).toHaveCount(12);
+  expect(requests).toHaveLength(13);
+  expect(requests[9].prompt).toContain("a celebratory fist-pump pose");
+  await expect(page.getByRole("status")).toHaveText("生成対象：ポーズ3（4枚）。");
+});
+
+test("avatar frames completed on another page are visible immediately on return", async ({ page }) => {
+  let finishFrame!: () => void;
+  const pendingFrame = new Promise<void>((resolve) => { finishFrame = resolve; });
+  const requests = await prepareAvatar(page, -1, async (index) => {
+    if (index === 1) await pendingFrame;
+  });
+  await prepareVoiceNavigation(page);
+  await page.getByRole("button", { name: "アバター生成", exact: true }).click();
+  try {
+    await expect.poll(() => requests.length).toBe(2);
+    await navigateToStudio(page, "Voice");
+  } finally {
+    finishFrame();
+  }
+  await expect.poll(async () => (await storedAvatarImages(page)).avatarPoses.length).toBe(1);
+  await navigateToStudio(page, "Avatar");
+  await expectPoseFrames(page, 1, 1);
+  await expect(page.getByRole("button", { name: "アバター生成", exact: true })).toBeEnabled();
+  expect(requests).toHaveLength(5);
+});
+
+test("a generation failure on another page keeps completed poses and permits retry on return", async ({ page }) => {
+  let finishFrame!: () => void;
+  const pendingFrame = new Promise<void>((resolve) => { finishFrame = resolve; });
+  const requests = await prepareAvatar(page, 5, async (index) => {
+    if (index === 5) await pendingFrame;
+  });
+  await prepareVoiceNavigation(page);
+  await selectPose(page, 2, "両手ピース");
+  await page.getByRole("button", { name: "アバター生成", exact: true }).click();
+  try {
+    await expect.poll(() => requests.length).toBe(6);
+    await navigateToStudio(page, "Voice");
+  } finally {
+    finishFrame();
+  }
+  await navigateToStudio(page, "Avatar");
+  await expect(page.getByText("テスト用の生成エラー", { exact: true })).toBeVisible();
+  await expectPoseFrames(page, 1, 1);
+  expect(requests).toHaveLength(6);
+  await generateAvatar(page, 8);
+  await expectPoseFrames(page, 1, 1);
+  await expectPoseFrames(page, 2, 6);
+  expect(requests).toHaveLength(10);
+});
+
+test("character generation also survives leaving and returning to Avatar", async ({ page }) => {
+  let finishImage!: () => void;
+  const pendingImage = new Promise<void>((resolve) => { finishImage = resolve; });
+  let requests = 0;
+  await page.route("**/api/generate-image", async (route) => {
+    requests++;
+    await pendingImage;
+    await route.fulfill({ json: { image: mockImage(0), provider: "vertex" } });
+  });
+  await prepareVoiceNavigation(page);
+  await page.goto("/avatar");
+  await page.getByRole("button", { name: "キャラクター生成", exact: true }).click();
+  try {
+    await expect.poll(() => requests).toBe(1);
+    await navigateToStudio(page, "Voice");
+    await navigateToStudio(page, "Avatar");
+    await expect(page.getByRole("button", { name: "キャラクター生成中...", exact: true })).toBeDisabled();
+    await expect(page.getByRole("status")).toHaveText("キャラクターを生成しています。");
+  } finally {
+    finishImage();
+  }
+  await expect(page.getByRole("img", { name: "生成したキャラクター", exact: true })).toHaveAttribute("src", mockImage(0));
+  await expect(page.getByRole("button", { name: "キャラクター生成", exact: true })).toBeEnabled();
+  expect(requests).toBe(1);
+});
+
 test("production UI preview uses OpenAI for the character and all twelve avatar frames", async ({ page }) => {
   const requests = await prepareAvatar(page);
   expect(requests[0].provider).toBe("vertex");
@@ -300,7 +414,10 @@ for (const [group, label, instruction] of [
     await selectPose(page, 2, "両手ピース");
     await selectPose(page, 3, "ガッツポーズ");
     await generateAvatar(page, 12);
+    await expect(page.getByRole("button", { name: /だけ再生成/ })).toHaveCount(0);
     await selectPose(page, group, label);
+    const poseGroups = page.getByLabel("ポーズ項目", { exact: true });
+    await expect(poseGroups.getByRole("button").filter({ hasText: /生成済み|変更あり|未生成/ })).toHaveCount(0);
     await expect(page.getByRole("status")).toHaveText(`生成対象：ポーズ${group}（4枚）。`);
     await generateAvatar(page, 12);
     expect(requests).toHaveLength(17);
@@ -311,8 +428,118 @@ for (const [group, label, instruction] of [
     }
     await expect(visibleAvatar(page)).toHaveAttribute("src", mockImage(13));
     await expect(visibleAvatar(page)).toHaveAttribute("alt", new RegExp(`ポーズ${group}・`));
+    await expect(poseGroups.getByRole("button").filter({ hasText: /生成済み|変更あり|未生成/ })).toHaveCount(0);
   });
 }
+
+for (const [group, id] of [[1, "basic"], [2, "gesture"], [3, "reaction"]] as const) {
+  test(`deleting pose ${group} preserves the other poses and can regenerate just the deleted pose`, async ({ page }) => {
+    const requests = await prepareAvatar(page);
+    await freezeClock(page);
+    await selectPose(page, 2, "両手ピース");
+    await selectPose(page, 3, "ガッツポーズ");
+    await generateAvatar(page, 12);
+    const saved = await storedAvatarImages(page);
+
+    await selectPoseGroup(page, group);
+    await page.getByRole("button", { name: `ポーズ${group}を削除`, exact: true }).click();
+    await expect(page.locator("#generated-image-panel img")).toHaveCount(8);
+    await expect(page.locator(`#generated-image-panel img[alt^="生成したアバター（ポーズ${group}・"]`)).toHaveCount(0);
+    await expect(visibleAvatar(page)).toHaveAttribute("alt", new RegExp(`ポーズ${group === 3 ? 2 : 3}・`));
+    expect(await storedAvatarImages(page)).toEqual({
+      ...saved,
+      avatarPoses: saved.avatarPoses.filter((pose) => pose.id !== id),
+    });
+
+    await page.reload();
+    await expect(page.locator("#generated-image-panel img")).toHaveCount(8);
+    await expect(page.getByRole("button", { name: `ポーズ${group}を削除`, exact: true })).toHaveCount(0);
+    expect(requests).toHaveLength(13);
+    await generateAvatar(page, 12);
+    expect(requests).toHaveLength(17);
+    for (let existing = 1; existing <= 3; existing++) {
+      await expectPoseFrames(page, existing, existing === group ? 13 : 1 + (existing - 1) * 4);
+    }
+  });
+}
+
+test("deleting the last pose clears its preview while keeping the character and custom settings", async ({ page }) => {
+  const requests = await prepareAvatar(page);
+  await selectPose(page, 1, "通常立ち");
+  await selectPoseGroup(page, 2);
+  await page.getByRole("button", { name: "ポーズ2を文章で指定", exact: true }).click();
+  await page.getByRole("textbox", { name: "文章で指定", exact: true }).fill("片手を高く上げる");
+  await generateAvatar(page, 4);
+  await page.getByRole("button", { name: "ポーズ2を削除", exact: true }).click();
+  await expect(page.locator("#generated-image-panel img")).toHaveCount(0);
+  await expect(page.getByText("ポーズから生成したアバターがここに表示されます。", { exact: true })).toBeVisible();
+  expect((await storedAvatarImages(page)).avatarPoses).toEqual([]);
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "アバター生成", exact: true })).toBeEnabled();
+  await expect(page.locator("#generated-image-panel img")).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "文章で指定", exact: true })).toHaveValue("片手を高く上げる");
+  await page.getByRole("tab", { name: "キャラクター", exact: true }).click();
+  await expect(page.getByRole("img", { name: "生成したキャラクター", exact: true })).toHaveAttribute("src", mockImage(0));
+  expect(requests).toHaveLength(5);
+  await generateAvatar(page, 4);
+  expect(requests).toHaveLength(9);
+  expect(requests[5].prompt).toContain("片手を高く上げる");
+  await expectPoseFrames(page, 2, 5);
+});
+
+test("pose deletion is hidden in production UI preview and disabled during generation", async ({ page }) => {
+  let releaseRequest: (() => void) | undefined;
+  const requests = await prepareAvatar(page, -1, async (index) => {
+    if (index === 9) await new Promise<void>((resolve) => { releaseRequest = resolve; });
+  });
+  await selectPose(page, 2, "両手ピース");
+  await generateAvatar(page, 8);
+  const deleteButton = page.getByRole("button", { name: "ポーズ2を削除", exact: true });
+  await expect(deleteButton).toBeEnabled();
+  await page.getByRole("button", { name: /本番UIを確認/ }).click();
+  await expect(page.getByRole("button", { name: /ポーズ[123]を削除/ })).toHaveCount(0);
+  await page.getByRole("button", { name: /開発UIに戻る/ }).click();
+
+  await selectPose(page, 1, "手を振る");
+  await page.getByRole("button", { name: "アバター生成", exact: true }).click();
+  await selectPoseGroup(page, 2);
+  await expect(deleteButton).toBeDisabled();
+  await expect.poll(() => Boolean(releaseRequest)).toBe(true);
+  releaseRequest!();
+  await expect(page.getByRole("button", { name: "アバター生成", exact: true })).toBeEnabled();
+  await expect(deleteButton).toBeEnabled();
+  expect(requests).toHaveLength(13);
+});
+
+test("a failed pose deletion preserves saved images and allows retry", async ({ page }) => {
+  const requests = await prepareAvatar(page);
+  await selectPose(page, 2, "両手ピース");
+  await generateAvatar(page, 8);
+  const saved = await storedAvatarImages(page);
+  await page.evaluate(() => {
+    const original = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (value, key) {
+      if (this.transaction.db.name === "chibichara-avatar" && key === "images") {
+        IDBObjectStore.prototype.put = original;
+        throw new DOMException("Test storage failure", "UnknownError");
+      }
+      return original.call(this, value, key);
+    };
+  });
+  const deleteButton = page.getByRole("button", { name: "ポーズ2を削除", exact: true });
+  await deleteButton.click();
+  await expect(page.getByRole("alert").filter({ hasText: "ポーズを削除できませんでした" })).toBeVisible();
+  await expectPoseFrames(page, 1, 1);
+  await expectPoseFrames(page, 2, 5);
+  expect(await storedAvatarImages(page)).toEqual(saved);
+
+  await deleteButton.click();
+  await expect(page.locator("#generated-image-panel img")).toHaveCount(4);
+  await expect(page.getByRole("alert").filter({ hasText: "ポーズを削除できませんでした" })).toHaveCount(0);
+  expect((await storedAvatarImages(page)).avatarPoses).toEqual(saved.avatarPoses.filter(({ id }) => id !== "gesture"));
+  expect(requests).toHaveLength(9);
+});
 
 for (const group of [2, 3]) {
   test(`viewing unselected pose ${group} still generates selected pose 1`, async ({ page }) => {
@@ -400,24 +627,30 @@ test("unchanged or reverted pose settings send no image requests", async ({ page
   const saved = await storedAvatarImages(page);
   await selectPose(page, 2, "腕組み");
   await selectPose(page, 2, "両手ピース");
-  await expect(page.getByRole("status")).toHaveText("選択中のポーズは生成済みです。変更したポーズだけを更新します。");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(page.getByLabel("ポーズ項目", { exact: true }).getByText("変更あり", { exact: true })).toHaveCount(0);
   await generateAvatar(page, 12);
   expect(requests).toHaveLength(13);
   expect(await storedAvatarImages(page)).toEqual(saved);
 });
 
-test("explicit regeneration replaces just the current saved pose without changing settings", async ({ page }) => {
+test("the main generation button updates both changed poses even while viewing the unchanged pose", async ({ page }) => {
   const requests = await prepareAvatar(page);
   await selectPose(page, 2, "両手ピース");
   await selectPose(page, 3, "ガッツポーズ");
   await generateAvatar(page, 12);
+  await selectPose(page, 1, "手を振る");
+  await selectPose(page, 3, "サムズアップ");
   await selectPoseGroup(page, 2);
-  await page.getByRole("button", { name: "ポーズ2だけ再生成", exact: true }).click();
-  await expect(page.getByRole("button", { name: "アバター生成", exact: true })).toBeEnabled();
-  expect(requests).toHaveLength(17);
-  await expectPoseFrames(page, 1, 1);
-  await expectPoseFrames(page, 2, 13);
-  await expectPoseFrames(page, 3, 9);
+  await expect(page.getByRole("status")).toHaveText("生成対象：ポーズ1・ポーズ3（8枚）。");
+  await expect(page.getByRole("button", { name: /だけ再生成/ })).toHaveCount(0);
+  await generateAvatar(page, 12);
+  expect(requests).toHaveLength(21);
+  expect(requests[13].prompt).toContain("waving with one hand");
+  expect(requests[17].prompt).toContain("giving a thumbs-up");
+  await expectPoseFrames(page, 1, 13);
+  await expectPoseFrames(page, 2, 5);
+  await expectPoseFrames(page, 3, 17);
 });
 
 test("custom pose changes survive reload and regenerate only the edited pose", async ({ page }) => {

@@ -84,6 +84,8 @@
 .secondary { border-color: #0891b24d; background: #fff; color: #083344; }
 .secondary:hover:not(:disabled) { border-color: #0891b2; background: #e6faff; }
 .empty .primary { margin-top: 8px; min-width: 180px; }
+.preparationLinks { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.preparationLinks .primary { margin-top: 0; }
 .kicker { color: #9b6b16; font-size: 12px; font-weight: 700; letter-spacing: .18em; }
 .center h2, .workflow h2 { font-size: 24px; font-weight: 700; line-height: 1.4; letter-spacing: -.025em; }
 .workflow { width: 100%; max-width: 680px; margin-block: auto; padding-block: 8px; }

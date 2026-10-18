@@ -31,6 +31,7 @@ for (const partial of [false, true]) {
     let references = 0;
     let jobRequests = 0;
     let trainingBody = "";
+    const deletedModels: string[] = [];
     const speech: { input: string; voiceAssetId?: string }[] = [];
     const completedJob = {
       id: "stored-job", voice_id: "my-character", status: "completed", phase: "completed",
@@ -51,6 +52,10 @@ for (const partial of [false, true]) {
       if (route.request().method() === "DELETE") return route.fulfill({ json: { deleted: true } });
       references++;
       return route.fulfill({ json: { voiceAssetId: `reference-${references}` } });
+    });
+    await page.route("**/api/speaker-assets", (route) => {
+      deletedModels.push(route.request().postDataJSON().voiceAssetId);
+      return route.fulfill({ json: { deleted: true } });
     });
     await page.route("**/api/speaker-inversion", (route) => {
       trainingBody = route.request().postDataBuffer()!.toString();
@@ -93,6 +98,7 @@ for (const partial of [false, true]) {
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "ボイスモデルを削除", exact: true }).click();
     await expect.poll(() => storedCounts(page)).toEqual([0, 0]);
+    expect(deletedModels).toEqual(["saved-voice"]);
     await page.reload();
     await expect(page.getByRole("button", { name: "声を生成（5本）", exact: true })).toBeEnabled();
     await expect(page.locator("audio")).toHaveCount(0);

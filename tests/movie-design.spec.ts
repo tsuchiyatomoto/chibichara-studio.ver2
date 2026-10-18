@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { saveMovieAvatar, saveMovieVoice } from "./movie-fixtures";
 
 const health = { voice_available: true, tts_ready: true, gemini_configured: true };
 
@@ -45,6 +46,8 @@ test("Movie uses the same light panels and action buttons as Avatar and Voice", 
   expect(await page.getByRole("banner").boundingBox()).toEqual(avatarHeader);
   await page.screenshot({ path: testInfo.outputPath("voice-reference.png") });
 
+  await saveMovieAvatar(page);
+  await saveMovieVoice(page);
   await page.goto("/movie");
   const box = page.getByRole("region", { name: "Movie 動画ボックス" });
   const upload = box.getByRole("button", { name: "MP4を選択", exact: true });

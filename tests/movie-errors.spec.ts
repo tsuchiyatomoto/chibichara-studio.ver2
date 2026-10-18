@@ -30,9 +30,8 @@ for (const { name, status, contentType, body } of responses) {
     await expect(page.getByRole("main").getByRole("alert")).toHaveText(
       `動画処理サーバーから正しい応答を取得できませんでした（HTTP ${status}）。ページを再読み込みして、もう一度お試しください。`,
     );
-    await expect(
-      page.getByRole("button", { name: "MP4を選択", exact: true }),
-    ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "MP4を選択", exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("MP4ファイル")).toBeDisabled();
   });
 }
 

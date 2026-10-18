@@ -1,8 +1,9 @@
 "use client";
 
 import Image from "next/image";
-import { type SubmitEvent, useEffect, useState } from "react";
+import { type SubmitEvent, useEffect, useSyncExternalStore } from "react";
 import { loadAvatarSession, saveAvatarSession } from "./avatar-storage";
+import { createAvatarSession } from "./avatar-session";
 
 type GenerateImageResponse = {
   image?: string;
@@ -415,57 +416,97 @@ const INITIAL_CUSTOM_PROMPTS: Record<AttributeId, string> = {
   outfit: "",
 };
 
-export default function AvatarStudio() {
-  const [imageProvider, setImageProvider] = useState<ImageProvider>(
-    IS_DEVELOPMENT ? "vertex" : "openai",
-  );
-  const [isProductionUiPreview, setIsProductionUiPreview] = useState(false);
-  const [activeEditorSection, setActiveEditorSection] =
-    useState<EditorSection>("attributes");
-  const [activeAttribute, setActiveAttribute] = useState<AttributeId>("gender");
-  const [attributeSelections, setAttributeSelections] = useState(
-    INITIAL_ATTRIBUTE_SELECTIONS,
-  );
-  const [customModes, setCustomModes] = useState(INITIAL_CUSTOM_MODES);
-  const [customPrompts, setCustomPrompts] = useState(INITIAL_CUSTOM_PROMPTS);
-  const [attributeInputMode, setAttributeInputMode] =
-    useState<AttributeInputMode>("guided");
-  const [globalCharacterPrompt, setGlobalCharacterPrompt] = useState("");
-  const [activePoseGroupId, setActivePoseGroupId] =
-    useState<PoseGroupId>("basic");
-  const [poseSelections, setPoseSelections] = useState(INITIAL_POSE_SELECTIONS);
-  const [poseCustomModes, setPoseCustomModes] = useState(
-    INITIAL_POSE_CUSTOM_MODES,
-  );
-  const [poseCustomPrompts, setPoseCustomPrompts] = useState(
-    INITIAL_POSE_CUSTOM_PROMPTS,
-  );
-  const [results, setResults] = useState<
-    Record<ResultView, GenerateImageResponse | null>
-  >({
+const avatarSession = createAvatarSession({
+  imageProvider: (IS_DEVELOPMENT ? "vertex" : "openai") as ImageProvider,
+  isProductionUiPreview: false,
+  activeEditorSection: "attributes" as EditorSection,
+  activeAttribute: "gender" as AttributeId,
+  attributeSelections: INITIAL_ATTRIBUTE_SELECTIONS,
+  customModes: INITIAL_CUSTOM_MODES,
+  customPrompts: INITIAL_CUSTOM_PROMPTS,
+  attributeInputMode: "guided" as AttributeInputMode,
+  globalCharacterPrompt: "",
+  activePoseGroupId: "basic" as PoseGroupId,
+  poseSelections: INITIAL_POSE_SELECTIONS,
+  poseCustomModes: INITIAL_POSE_CUSTOM_MODES,
+  poseCustomPrompts: INITIAL_POSE_CUSTOM_PROMPTS,
+  results: {
     character: null,
     avatar: null,
-  });
-  const [avatarPoses, setAvatarPoses] = useState<AvatarPose[]>([]);
-  const [activeAvatarPoseIndex, setActiveAvatarPoseIndex] = useState(0);
-  const [isAvatarMouthOpen, setIsAvatarMouthOpen] = useState(false);
-  const [areAvatarEyesClosed, setAreAvatarEyesClosed] = useState(false);
-  const [isAvatarPreviewPlaying, setIsAvatarPreviewPlaying] = useState(true);
-  const [selectedAvatarFrameIndex, setSelectedAvatarFrameIndex] = useState(0);
-  const [activeResultView, setActiveResultView] =
-    useState<ResultView>("character");
-  const [generatingResultView, setGeneratingResultView] =
-    useState<ResultView | null>(null);
-  const [generationProgress, setGenerationProgress] = useState(100);
-  const [generationProgressTarget, setGenerationProgressTarget] = useState(100);
-  const [generationProgressRunId, setGenerationProgressRunId] = useState(0);
-  const [generationMessage, setGenerationMessage] = useState("");
-  const [error, setError] = useState("");
-  const [storageReady, setStorageReady] = useState(false);
-  const [storageWritable, setStorageWritable] = useState(false);
-  const [storageReadError, setStorageReadError] = useState("");
-  const [imageSaveError, setImageSaveError] = useState("");
-  const [editorSaveError, setEditorSaveError] = useState("");
+  } as Record<ResultView, GenerateImageResponse | null>,
+  avatarPoses: [] as AvatarPose[],
+  isDeletingPose: false,
+  activeAvatarPoseIndex: 0,
+  isAvatarMouthOpen: false,
+  areAvatarEyesClosed: false,
+  isAvatarPreviewPlaying: true,
+  selectedAvatarFrameIndex: 0,
+  activeResultView: "character" as ResultView,
+  generatingResultView: null as ResultView | null,
+  generationProgress: 100,
+  generationProgressTarget: 100,
+  generationProgressRunId: 0,
+  generationMessage: "",
+  error: "",
+  storageReady: false,
+  storageWritable: false,
+  storageReadError: "",
+  imageSaveError: "",
+  editorSaveError: "",
+});
+
+const {
+  imageProvider: setImageProvider,
+  isProductionUiPreview: setIsProductionUiPreview,
+  activeEditorSection: setActiveEditorSection,
+  activeAttribute: setActiveAttribute,
+  attributeSelections: setAttributeSelections,
+  customModes: setCustomModes,
+  customPrompts: setCustomPrompts,
+  attributeInputMode: setAttributeInputMode,
+  globalCharacterPrompt: setGlobalCharacterPrompt,
+  activePoseGroupId: setActivePoseGroupId,
+  poseSelections: setPoseSelections,
+  poseCustomModes: setPoseCustomModes,
+  poseCustomPrompts: setPoseCustomPrompts,
+  results: setResults,
+  avatarPoses: setAvatarPoses,
+  isDeletingPose: setIsDeletingPose,
+  activeAvatarPoseIndex: setActiveAvatarPoseIndex,
+  isAvatarMouthOpen: setIsAvatarMouthOpen,
+  areAvatarEyesClosed: setAreAvatarEyesClosed,
+  isAvatarPreviewPlaying: setIsAvatarPreviewPlaying,
+  selectedAvatarFrameIndex: setSelectedAvatarFrameIndex,
+  activeResultView: setActiveResultView,
+  generatingResultView: setGeneratingResultView,
+  generationProgress: setGenerationProgress,
+  generationProgressTarget: setGenerationProgressTarget,
+  generationProgressRunId: setGenerationProgressRunId,
+  generationMessage: setGenerationMessage,
+  error: setError,
+  storageReady: setStorageReady,
+  storageWritable: setStorageWritable,
+  storageReadError: setStorageReadError,
+  imageSaveError: setImageSaveError,
+  editorSaveError: setEditorSaveError,
+} = avatarSession.setters;
+
+export default function AvatarStudio() {
+  const {
+    imageProvider, isProductionUiPreview, activeEditorSection, activeAttribute,
+    attributeSelections, customModes, customPrompts, attributeInputMode,
+    globalCharacterPrompt, activePoseGroupId, poseSelections, poseCustomModes,
+    poseCustomPrompts, results, avatarPoses, isDeletingPose, activeAvatarPoseIndex,
+    isAvatarMouthOpen, areAvatarEyesClosed, isAvatarPreviewPlaying,
+    selectedAvatarFrameIndex, activeResultView, generatingResultView,
+    generationProgress, generationProgressTarget, generationProgressRunId,
+    generationMessage, error, storageReady, storageWritable, storageReadError,
+    imageSaveError, editorSaveError,
+  } = useSyncExternalStore(
+    avatarSession.subscribe,
+    avatarSession.getSnapshot,
+    avatarSession.getServerSnapshot,
+  );
   const storageError = storageReadError || imageSaveError || editorSaveError;
 
   const activeGroup =
@@ -510,7 +551,7 @@ export default function AvatarStudio() {
   const isAvatarFrameInspectionPaused =
     IS_DEVELOPMENT && !isProductionUiPreview && !isAvatarPreviewPlaying;
   const isAvatarPoseSwitchingPaused =
-    isAvatarFrameInspectionPaused || isGenerating;
+    isAvatarFrameInspectionPaused || isGenerating || isDeletingPose;
   const activeAvatarFrameIndex = isAvatarFrameInspectionPaused
     ? selectedAvatarFrameIndex
     : animatedAvatarFrameIndex;
@@ -586,6 +627,7 @@ export default function AvatarStudio() {
   }, [avatarPoses.length, isAvatarPoseSwitchingPaused, activeResultView]);
 
   useEffect(() => {
+    if (storageReady) return;
     let cancelled = false;
     const restore = async () => {
       try {
@@ -668,7 +710,7 @@ export default function AvatarStudio() {
     };
     void restore();
     return () => { cancelled = true; };
-  }, []);
+  }, [storageReady]);
 
   useEffect(() => {
     if (!storageReady || !storageWritable) return;
@@ -692,15 +734,62 @@ export default function AvatarStudio() {
     attributeSelections, customModes, customPrompts, attributeInputMode, globalCharacterPrompt,
     activePoseGroupId, poseSelections, poseCustomModes, poseCustomPrompts, activeResultView]);
 
-  async function persistImages(character: GenerateImageResponse | null, poses: AvatarPose[]) {
-    if (!storageWritable) return;
+  async function persistImages(
+    character: GenerateImageResponse | null,
+    poses: AvatarPose[],
+    failureMessage = "画像をブラウザに保存できませんでした。今回生成した画像は再読み込みすると失われます。空き容量やブラウザの保存設定を確認してください。",
+  ) {
+    if (!storageWritable) return false;
     const images: StoredAvatarImages = { version: 1, character, avatarPoses: poses };
     try {
       // Data URLs survive reloads. Commit the whole set atomically before enabling generation again.
       await saveAvatarSession("images", images);
       setImageSaveError("");
+      return true;
     } catch {
-      setImageSaveError("画像をブラウザに保存できませんでした。今回生成した画像は再読み込みすると失われます。空き容量やブラウザの保存設定を確認してください。");
+      setImageSaveError(failureMessage);
+      return false;
+    }
+  }
+
+  async function handleDeletePose(poseId: PoseGroupId) {
+    if (
+      !IS_DEVELOPMENT || isProductionUiPreview ||
+      !storageReady || !storageWritable || isGenerating || isDeletingPose
+    ) {
+      return;
+    }
+    const removedIndex = avatarPoses.findIndex(({ id }) => id === poseId);
+    if (removedIndex < 0) return;
+    const remainingPoses = avatarPoses.filter(({ id }) => id !== poseId);
+
+    setIsDeletingPose(true);
+    try {
+      const saved = await persistImages(
+        results.character,
+        remainingPoses,
+        "ポーズを削除できませんでした。ブラウザの保存設定を確認して、もう一度お試しください。",
+      );
+      if (!saved) return;
+
+      setAvatarPoses(remainingPoses);
+      // Keep the displayed pose when removing an earlier entry in the list.
+      setActiveAvatarPoseIndex((current) =>
+        Math.max(0, current - (removedIndex <= current ? 1 : 0)),
+      );
+      setIsAvatarMouthOpen(false);
+      setAreAvatarEyesClosed(false);
+      setSelectedAvatarFrameIndex(0);
+      const remainingPose = remainingPoses[0];
+      setResults((current) => ({
+        ...current,
+        avatar: remainingPose
+          ? { image: remainingPose.frames[0], provider: remainingPose.provider }
+          : null,
+      }));
+      setError("");
+    } finally {
+      setIsDeletingPose(false);
     }
   }
 
@@ -743,8 +832,8 @@ export default function AvatarStudio() {
     void generateImages(generationTarget);
   }
 
-  async function generateImages(target: ResultView, regeneratePoseId?: PoseGroupId) {
-    if (!storageReady || isGenerating) {
+  async function generateImages(target: ResultView) {
+    if (!storageReady || isGenerating || isDeletingPose) {
       return;
     }
 
@@ -781,10 +870,8 @@ export default function AvatarStudio() {
     }
 
     // Capture this render's settings; edits during generation apply next time.
-    const requestedPoses = regeneratePoseId
-      ? selectedPoses.filter(({ id }) => id === regeneratePoseId)
-      : selectedPoses;
-    const posesToGenerate = regeneratePoseId ? requestedPoses : pendingAvatarPoses;
+    const requestedPoses = selectedPoses;
+    const posesToGenerate = pendingAvatarPoses;
 
     if (target === "avatar") {
       const emptyPose = requestedPoses.find(({ instruction }) => !instruction);
@@ -1347,8 +1434,7 @@ export default function AvatarStudio() {
                     </div>
                   </div>
                   <p className="mb-5 text-sm leading-6 text-[#686052]">
-                    選択済みのポーズを番号順に、各4枚ずつ連続生成します。3ポーズなら合計12枚です。生成済みのポーズは4枚完成後に置き換え、未選択のポーズの画像は保持します。
-                    最大3ポーズを保存でき、複数ある場合は4秒ごとにランダムに切り替えます。
+                    キャラクターにポーズを与えて、アバターにしてください。
                   </p>
 
                   <div
@@ -1397,26 +1483,40 @@ export default function AvatarStudio() {
                       <h3 className="text-sm font-bold">
                         {activePoseGroup.label}
                       </h3>
-                      <button
-                        type="button"
-                        aria-pressed={poseCustomModes[activePoseGroup.id]}
-                        aria-label={`${activePoseGroup.label}を文章で指定`}
-                        title="文章で指定"
-                        onClick={() => {
-                          setPoseCustomModes((current) => ({
-                            ...current,
-                            [activePoseGroup.id]: !current[activePoseGroup.id],
-                          }));
-                          setError("");
-                        }}
-                        className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
-                          poseCustomModes[activePoseGroup.id]
-                            ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
-                            : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
-                        }`}
-                      >
-                        T
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {IS_DEVELOPMENT && !isProductionUiPreview &&
+                        avatarPoses.some(({ id }) => id === activePoseGroup.id) ? (
+                          <button
+                            type="button"
+                            aria-label={`${activePoseGroup.label}を削除`}
+                            disabled={!storageReady || !storageWritable || isGenerating || isDeletingPose}
+                            onClick={() => void handleDeletePose(activePoseGroup.id)}
+                            className="min-h-9 rounded-lg border border-[#f3b5b5] bg-white px-3 py-2 text-xs font-bold text-[#9b1c1c] transition hover:bg-[#fff1f1] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9b1c1c] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            削除
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          aria-pressed={poseCustomModes[activePoseGroup.id]}
+                          aria-label={`${activePoseGroup.label}を文章で指定`}
+                          title="文章で指定"
+                          onClick={() => {
+                            setPoseCustomModes((current) => ({
+                              ...current,
+                              [activePoseGroup.id]: !current[activePoseGroup.id],
+                            }));
+                            setError("");
+                          }}
+                          className={`flex h-9 w-9 items-center justify-center rounded-lg border font-serif text-base font-black transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0891b2] ${
+                            poseCustomModes[activePoseGroup.id]
+                              ? "border-[#0891b2] bg-[#ffd84d] text-[#083344] shadow-[0_2px_0_#0891b2]"
+                              : "border-[#0891b2]/30 bg-white text-[#083344] hover:border-[#0891b2] hover:bg-[#e6faff]"
+                          }`}
+                        >
+                          T
+                        </button>
+                      </div>
                     </div>
 
                     {poseCustomModes[activePoseGroup.id] ? (
@@ -1501,18 +1601,17 @@ export default function AvatarStudio() {
                 <p role="status" className="text-sm text-[#686052]">
                   {generationMessage}
                 </p>
-              ) : generationTarget === "avatar" && results.character?.image ? (
+              ) : generationTarget === "avatar" && results.character?.image &&
+                (pendingAvatarPoses.length > 0 || selectedPoses.length === 0) ? (
                 <p role="status" className="text-sm text-[#686052]">
                   {pendingAvatarPoses.length > 0
                     ? `生成対象：${pendingAvatarPoses.map(({ label }) => label).join("・")}（${pendingAvatarPoses.length * AVATAR_FRAME_LABELS.length}枚）。`
-                    : selectedPoses.length > 0
-                      ? "選択中のポーズは生成済みです。変更したポーズだけを更新します。"
-                      : "生成するポーズを選択してください。"}
+                    : "生成するポーズを選択してください。"}
                 </p>
               ) : null}
               <button
                 type="submit"
-                disabled={!storageReady || isGenerating}
+                disabled={!storageReady || isGenerating || isDeletingPose}
                 className="h-12 rounded-lg border border-[#b91c1c] bg-[#dc2626] px-4 text-sm font-bold text-white shadow-[0_3px_0_#b91c1c] transition hover:bg-[#ef4444] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b91c1c] active:translate-y-0.5 active:shadow-none disabled:cursor-not-allowed disabled:border-[#a9a29e] disabled:bg-[#d6d3d1] disabled:text-[#68635f] disabled:shadow-none"
               >
                 {isGenerating
@@ -1523,18 +1622,6 @@ export default function AvatarStudio() {
                     }生成中...`
                   : `${generationTargetLabel}生成`}
               </button>
-              {generationTarget === "avatar" &&
-                avatarPoses.some(({ id }) => id === activePoseGroupId) &&
-                selectedPoses.some(({ id }) => id === activePoseGroupId) ? (
-                <button
-                  type="button"
-                  disabled={!storageReady || isGenerating}
-                  onClick={() => void generateImages("avatar", activePoseGroupId)}
-                  className="min-h-10 rounded-lg border border-[#0891b2] bg-white px-4 py-2 text-sm font-bold text-[#075985] hover:bg-[#e6faff] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {activePoseGroup.label}だけ再生成
-                </button>
-              ) : null}
               {error ? (
                 <p className="rounded-md border border-[#f3b5b5] bg-[#fff1f1] px-3 py-2 text-sm leading-6 text-[#9b1c1c]">
                   {error}
@@ -1813,7 +1900,7 @@ export default function AvatarStudio() {
       {IS_DEVELOPMENT ? (
         <button
           type="button"
-          disabled={isGenerating}
+          disabled={isGenerating || isDeletingPose}
           onClick={() => {
             if (isProductionUiPreview) {
               setIsProductionUiPreview(false);

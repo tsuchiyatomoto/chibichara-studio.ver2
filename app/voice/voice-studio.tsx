@@ -270,6 +270,15 @@ async function deleteReferenceVoiceAsset(assetId: string | null) {
   }).catch(() => undefined);
 }
 
+async function deleteSavedVoiceAsset(voiceAssetId: string) {
+  const response = await fetch("/api/speaker-assets", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voiceAssetId }),
+  });
+  if (!response.ok) throw new Error(await readApiError(response));
+}
+
 function speakerPhaseLabel(job: SpeakerInversionJob) {
   if (job.status === "completed") return "完成";
   if (job.status === "failed") return "失敗";
@@ -320,6 +329,7 @@ export default function VoiceStudio() {
   const [speakerCapability, setSpeakerCapability] =
     useState<SpeakerInversionCapability | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isDeletingVoice, setIsDeletingVoice] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<{
     current: number;
     total: number;
@@ -359,7 +369,7 @@ export default function VoiceStudio() {
   const completedVoiceName = speakerJob?.result?.voice_id ?? "my-character";
   const isSavingSpeaker = unsavedSpeakerJobId !== null;
   const controlsDisabled =
-    !storageReady || isCompletionPreview || generatingTrainedKey !== null || isGenerating || isTrainingActive || isStartingTraining || isSavingSpeaker;
+    !storageReady || isCompletionPreview || generatingTrainedKey !== null || isGenerating || isDeletingVoice || isTrainingActive || isStartingTraining || isSavingSpeaker;
   const displayedSpeakerJob: SpeakerInversionJob | null = isCompletionPreview
     ? {
         id: "preview",
@@ -718,6 +728,16 @@ export default function VoiceStudio() {
   }
 
   async function clearTrainingSession() {
+    if (isDeletingVoice) return false;
+    setIsDeletingVoice(true);
+    try {
+      // Keep the local model and samples until the server confirms deletion.
+      if (savedVoiceAssetId) await deleteSavedVoiceAsset(savedVoiceAssetId);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "ボイスモデルを削除できませんでした。もう一度お試しください。");
+      setIsDeletingVoice(false);
+      return false;
+    }
     trainedRequestRef.current?.abort();
     trainedUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     trainedUrlsRef.current = [];
@@ -736,9 +756,12 @@ export default function VoiceStudio() {
     setActiveTrainingSampleIndex(0);
     setError("");
     await deleteReferenceVoiceAsset(oldReferenceVoiceAssetId);
+    setIsDeletingVoice(false);
+    return true;
   }
 
   async function handleResetSamples() {
+    if (controlsDisabled) return false;
     if (
       (trainingSamples.length > 0 || Object.keys(trainedAudio).length > 0) &&
       !window.confirm("生成したボイスをすべて削除しますか？")
@@ -746,8 +769,7 @@ export default function VoiceStudio() {
       return false;
     }
 
-    await clearTrainingSession();
-    return true;
+    return clearTrainingSession();
   }
 
   async function handleGenerateTrainedSample() {
@@ -946,7 +968,7 @@ export default function VoiceStudio() {
       ) {
         return;
       }
-      await clearTrainingSession();
+      if (!(await clearTrainingSession())) return;
       sampleTexts = [...TRAINING_SAMPLE_TEXTS];
       generationVoiceAssetId = null;
     }
