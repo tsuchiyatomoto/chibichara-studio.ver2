@@ -7,9 +7,13 @@
     "build": "next build",
     "start": "node scripts/start-next.mjs start",
     "lint": "eslint",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "r2:check": "node scripts/configure-movie-r2.mjs",
+    "r2:configure": "node scripts/configure-movie-r2.mjs --apply"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
     "@google/genai": "^2.10.0",
     "next": "16.2.10",
     "openai": "^7.5.0",

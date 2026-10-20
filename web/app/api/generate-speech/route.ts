@@ -1,4 +1,5 @@
 import { getVoiceOwnerId } from "../_lib/voice-owner";
+import { voiceServerlessEnabled, voiceHealth, serviceResponse, submitSpeech } from "../_lib/service-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -6,7 +7,7 @@ export const dynamic = "force-dynamic";
 const DEFAULT_IRODORI_TTS_BASE_URL = "http://127.0.0.1:8088";
 const DEFAULT_IRODORI_TTS_MODEL = "irodori-tts";
 const HEALTH_TIMEOUT_MS = 5000;
-const MAX_INPUT_LENGTH = 5000;
+const MAX_INPUT_LENGTH = 4096;
 const MAX_CAPTION_LENGTH = 1000;
 
 type GenerateSpeechRequest = {
@@ -93,6 +94,7 @@ async function getUpstreamErrorDetail(response: Response) {
 }
 
 export async function GET() {
+  if (voiceServerlessEnabled()) return voiceHealth();
   try {
     const response = await fetchWithTimeout(
       `${getIrodoriBaseUrl()}/health`,
@@ -193,6 +195,9 @@ export async function POST(request: Request) {
   if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) {
     return jsonError("読み上げ速度は0.25〜4.0の範囲で指定してください。", 400);
   }
+
+  if (voiceServerlessEnabled()) return serviceResponse(async () =>
+    submitSpeech(await getVoiceOwnerId(), request, { input, caption, speed, voice, voiceAssetId }));
 
   try {
     const upstreamHeaders = getUpstreamHeaders(true);

@@ -1,11 +1,15 @@
 import "server-only";
 import { getVoiceOwnerId } from "./voice-owner";
+import { voiceServerlessEnabled, toonoutServerlessEnabled, serviceJob } from "./service-serverless";
 
 export async function proxyWorkerJob(request: Request, parts: string[], kind: "speech" | "image") {
   if (parts.length < 1 || parts.length > 2 || !/^job_[a-f0-9]{32}$/.test(parts[0]) ||
       (parts.length === 2 && parts[1] !== "content") ||
       !["GET", "DELETE"].includes(request.method) || (parts.length === 2 && request.method !== "GET")) {
     return Response.json({ error: "ジョブのパスが不正です。" }, { status: 400 });
+  }
+  if (kind === "speech" ? voiceServerlessEnabled() : toonoutServerlessEnabled()) {
+    return serviceJob(await getVoiceOwnerId(), kind, parts[0], request.method, parts[1] === "content");
   }
   const token = kind === "speech" ? process.env.IRODORI_TTS_API_KEY : process.env.TOONOUT_WORKER_TOKEN;
   const base = kind === "speech"

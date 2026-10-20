@@ -1,0 +1,16 @@
+# Build from the already tested GPU image; keep Pod/local launch unchanged.
+ARG BASE_IMAGE=ghcr.io/tsuchiyatomoto/chibichara-gpu:v0.1.0-daf26df
+FROM ${BASE_IMAGE}
+WORKDIR /opt/chibichara
+COPY movie_worker ./movie_worker
+COPY service_serverless.py ./service_serverless.py
+COPY docker/serverless-entry.py ./docker/serverless-entry.py
+RUN uv pip install --python /opt/venvs/movie/bin/python 'runpod==1.7.13' 'boto3==1.40.75'
+RUN uv pip install --python /opt/venvs/irodori/bin/python 'runpod==1.7.13' 'boto3==1.40.75' 'httpx==0.28.1' && \
+    uv pip install --python /opt/venvs/toonout/bin/python 'runpod==1.7.13' 'boto3==1.40.75' 'httpx==0.28.1'
+ENV MOVIE_DATA_DIR=/tmp/chibichara-movie-api \
+    MOVIE_LOCAL_TMP=/tmp/chibichara-movie \
+    CHIBICHARA_DATA_ROOT=/tmp/chibichara-data \
+    TMPDIR=/tmp/chibichara-tmp
+HEALTHCHECK NONE
+CMD ["/usr/bin/python3", "/opt/chibichara/docker/serverless-entry.py"]

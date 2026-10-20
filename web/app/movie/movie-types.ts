@@ -62,6 +62,7 @@ export type Job = {
   avatar?: MovieAvatar;
 };
 export type Health = {
+  backend?: "http" | "runpod";
   voice_available: boolean;
   tts_ready: boolean;
   gemini_configured: boolean;

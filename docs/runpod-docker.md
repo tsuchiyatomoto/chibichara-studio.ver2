@@ -1,5 +1,7 @@
 # RunPod用Docker構成
 
+MovieのQueue-based Serverless実装と一時保存設定は [movie-serverless.md](movie-serverless.md) を参照。以下は既存の常駐HTTPサーバー用構成。
+
 `gpu/`をビルドコンテキストにし、Irodori-TTS・Movie・ToonOutを1つの
 Linuxコンテナで動かす。Next.jsは含めず、Renderの`web/`から各APIへ接続する。
 
@@ -162,6 +164,8 @@ Movieの長いTTS呼び出しは同じPod内の`127.0.0.1:8088`を使う。
 [RunPodの通信仕様](https://docs.runpod.io/pods/configuration/expose-ports)
 
 ## 起動処理のテスト
+
+Voice・ToonOutをQUEUE型Serverlessで動かす構成、R2経由の声の受け渡しと確認結果は [Voice・ToonOut Serverless](voice-toonout-serverless.md) を参照。
 
 Dockerを使わず、Python 3.12の標準ライブラリだけで認証・保存先・ヘルスチェック・
 起動待ち処理を検証できる。リポジトリ直下から実行する。

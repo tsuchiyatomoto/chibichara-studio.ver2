@@ -4,7 +4,8 @@ import {
   getErrorMessage,
   getIrodoriErrorDetail,
 } from "../_lib/irodori";
-import { getScopedIrodoriHeaders } from "../_lib/voice-owner";
+import { getScopedIrodoriHeaders, getVoiceOwnerId } from "../_lib/voice-owner";
+import { voiceServerlessEnabled, serviceResponse, createVoiceReference, removeVoiceAsset, readServiceForm } from "../_lib/service-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,11 @@ const MAX_REFERENCE_BYTES = 25 * 1024 * 1024;
 const ASSET_ID_PATTERN = /^vasset_[a-f0-9]{32}$/;
 
 export async function POST(request: Request) {
+  if (voiceServerlessEnabled()) return serviceResponse(async () => {
+    const file = (await readServiceForm(request, 11 * 1024 ** 2)).get("file");
+    if (!(file instanceof File)) return apiError("基準にする音声ファイルが必要です。", 400);
+    return createVoiceReference(await getVoiceOwnerId(), file);
+  });
   try {
     const input = await request.formData();
     const file = input.get("file");
@@ -80,6 +86,8 @@ export async function DELETE(request: Request) {
   if (!ASSET_ID_PATTERN.test(voiceAssetId)) {
     return apiError("基準音声IDが正しくありません。", 400);
   }
+
+  if (voiceServerlessEnabled()) return serviceResponse(async () => removeVoiceAsset(await getVoiceOwnerId(), voiceAssetId));
 
   try {
     const response = await fetchIrodori(

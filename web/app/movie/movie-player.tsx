@@ -93,7 +93,8 @@ export default function MoviePlayer({
   const hasUploadAssets = !checkingAssets && !missingVoice && !missingAvatar;
   const canUpload = !locked && hasUploadAssets;
   const completed = job?.state === "completed";
-  const reviewing = job?.state === "ready" && !!job.media;
+  const serverless = health?.backend === "runpod";
+  const reviewing = job?.state === "ready" && (!!job.media || serverless);
   const playable = completed || reviewing;
   const stopped = job && ["failed", "cancelled"].includes(job.state);
   const transitioning = job?.analyzed && !running && !stopped && !completed;
@@ -277,9 +278,11 @@ export default function MoviePlayer({
             {stopped && job && (
               <div className={styles.center}>
                 <span className={styles.kicker}>{job.state === "cancelled" ? "CANCELLED" : "PAUSED"}</span>
-                <h2>{job.state === "cancelled" ? "処理を中止しました" : "処理を再開できます"}</h2>
+                <h2>{job.state === "cancelled" ? "処理を中止しました" : serverless ? "動画を処理できませんでした" : "処理を再開できます"}</h2>
                 <p>{job.message}</p>
-                <button className={styles.primary} disabled={busy} onClick={onResume}>未完了の工程から再開</button>
+                {serverless
+                  ? <button className={styles.primary} disabled={!canUpload} onClick={chooseFile}>MP4を選択してやり直す</button>
+                  : <button className={styles.primary} disabled={busy} onClick={onResume}>未完了の工程から再開</button>}
               </div>
             )}
           </div>
@@ -311,7 +314,7 @@ export default function MoviePlayer({
           </> : <div className={styles.settings}>
             <div><h3>使用する声</h3><p>{voiceNotice}</p>{health?.error && <p className={styles.notice}>{health.error}</p>}</div>
             {job?.state === "ready" && <label className={styles.label}>ゲーム用語・固有名詞（任意）<input value={settings.glossary} maxLength={2000} disabled={locked} placeholder="キャラクター名、技名、ゲーム名など" onChange={(event) => settings.setGlossary(event.target.value)} /></label>}
-            {job?.analyzed && <>
+            {(serverless ? reviewing : job?.analyzed) && <>
               <div className={styles.gains}>
                 {[{ label: "ゲーム音量", value: settings.gameGain, set: settings.setGameGain }, { label: "実況音量", value: settings.voiceGain, set: settings.setVoiceGain }].map((gain) => <label key={gain.label} className={styles.label}>{gain.label} · {Math.round(gain.value * 100)}%<input type="range" min="0" max="2" step="0.05" value={gain.value} disabled={locked} onChange={(event) => gain.set(Number(event.target.value))} /></label>)}
               </div>
@@ -320,7 +323,7 @@ export default function MoviePlayer({
             {job && <>
               <div><h3>処理の詳細</h3><p className={styles.fileName}>{job.name}</p><p className={styles.hint}>{STATES[job.state] ?? job.state} · {(job.size / 1024 ** 2).toFixed(1)} MB{job.media && ` · ${stamp(job.media.duration)}`}</p>{job.warning && <p className={styles.notice}>{job.warning}</p>}{mutedCount > 0 && <p className={styles.hint}>{mutedCount}件を自動で無音処理しました。</p>}</div>
               {completed && <a className={styles.secondary} href={fileUrl(job, "commentary.wav")} download="commentary.wav"><Icon name="download" />実況WAVをダウンロード</a>}
-              <AudioDiagnostics key={job.id} job={job} />
+              {!serverless && <AudioDiagnostics key={job.id} job={job} />}
             </>}
             <p className={styles.hint}>解析・生成で確認が必要な発言は、自動的に無音にして処理を続けます。</p>
             <p className={styles.hint}>MP4・最大{Math.round((health?.max_bytes ?? 20 * 1024 ** 3) / 1024 ** 3)} GiB・60分まで。ゲーム音と実況音を別々の音声トラックに収録してください。</p>

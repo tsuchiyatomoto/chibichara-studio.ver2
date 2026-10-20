@@ -238,6 +238,7 @@ export default function MovieStudio() {
         game_index: prepared.media?.audio[0]?.index,
         voice_index: prepared.media?.audio[1]?.index,
         glossary,
+        ...(health?.backend === "runpod" ? { game_gain: gameGain, voice_gain: voiceGain } : {}),
       });
     });
   }

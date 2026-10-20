@@ -11,10 +11,11 @@ registerHooks({
       }
       if (specifier === "../_lib/voice-owner") {
         return { url: "data:text/javascript," + encodeURIComponent(
-          'export async function getScopedIrodoriHeaders() { return new Headers({"X-Irodori-Owner-ID":"anon_test-owner"}); }',
+          'export async function getScopedIrodoriHeaders() { return new Headers({"X-Irodori-Owner-ID":"anon_test-owner"}); } export async function getVoiceOwnerId(){return "anon_test-owner";}',
         ), shortCircuit: true };
       }
     }
+    if (context.parentURL?.includes("/app/") && specifier.startsWith(".") && !/\.[a-z]+$/.test(specifier)) return nextResolve(specifier + ".ts", context);
     return nextResolve(specifier, context);
   },
 });

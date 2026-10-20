@@ -4,7 +4,8 @@ import {
   getErrorMessage,
   getIrodoriErrorDetail,
 } from "../../_lib/irodori";
-import { getScopedIrodoriHeaders } from "../../_lib/voice-owner";
+import { getScopedIrodoriHeaders, getVoiceOwnerId } from "../../_lib/voice-owner";
+import { voiceServerlessEnabled, serviceJob } from "../../_lib/service-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,8 @@ async function proxyJob(method: "GET" | "DELETE", context: RouteContext) {
   if (!JOB_ID_PATTERN.test(jobId)) {
     return apiError("学習ジョブIDが正しくありません。", 400);
   }
+
+  if (voiceServerlessEnabled()) return serviceJob(await getVoiceOwnerId(), "training", jobId, method);
 
   try {
     const response = await fetchIrodori(

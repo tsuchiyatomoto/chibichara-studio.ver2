@@ -5,6 +5,7 @@ import test from "node:test";
 // Match Next's extensionless local import while running the actual route in Node.
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === "server-only") return { url: "data:text/javascript,export {};", shortCircuit: true };
     if (specifier === "../_lib/voice-owner") return {
       url: "data:text/javascript,export async function getVoiceOwnerId() { return 'anon_' + 'a'.repeat(32); }", shortCircuit: true,
     };
@@ -14,6 +15,7 @@ registerHooks({
     if (specifier === "./toonout" && context.parentURL?.includes("/app/api/generate-image/route.ts")) {
       return nextResolve(new URL("./toonout.ts", context.parentURL).href, context);
     }
+    if (context.parentURL?.includes("/app/") && specifier.startsWith(".") && !/\.[a-z]+$/.test(specifier)) return nextResolve(specifier + ".ts", context);
     return nextResolve(specifier, context);
   },
 });

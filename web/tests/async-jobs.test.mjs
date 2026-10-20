@@ -8,6 +8,7 @@ registerHooks({
     if (specifier.endsWith("voice-owner")) return {
       url: "data:text/javascript,export async function getVoiceOwnerId() { return 'anon_' + 'a'.repeat(32); }", shortCircuit: true,
     };
+    if (context.parentURL?.includes("/app/") && specifier.startsWith(".") && !/\.[a-z]+$/.test(specifier)) return nextResolve(specifier + ".ts", context);
     return nextResolve(specifier, context);
   },
 });

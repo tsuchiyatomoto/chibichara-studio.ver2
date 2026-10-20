@@ -1,3 +1,5 @@
+import { toonoutServerlessEnabled, ensureToonoutConfigured, submitImage } from "../_lib/service-serverless";
+
 const WORKER_URL = (process.env.TOONOUT_WORKER_URL ?? "http://127.0.0.1:8091").replace(/\/+$/, "");
 
 export class ToonOutError extends Error {}
@@ -25,6 +27,7 @@ async function failure(response: Response) {
 }
 
 export async function ensureToonOutReady() {
+  if (toonoutServerlessEnabled()) { await ensureToonoutConfigured(); return; }
   try {
     const response = await fetch(`${WORKER_URL}/health`, {
       headers: headers(),
@@ -41,6 +44,7 @@ export async function ensureToonOutReady() {
 }
 
 export async function submitBackgroundRemoval(data: string, mimeType: string, owner: string) {
+  if (toonoutServerlessEnabled()) return submitImage(owner, data, mimeType);
   const key = crypto.randomUUID();
   for (let attempt = 0; attempt < 3; attempt++) {
     try {

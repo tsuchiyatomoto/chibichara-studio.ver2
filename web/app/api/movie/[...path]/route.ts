@@ -1,4 +1,5 @@
 import { getVoiceOwnerId } from "../../_lib/voice-owner";
+import { movieServerless } from "../../_lib/movie-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,9 @@ async function proxy(
     );
   }
   try {
+    if (process.env.MOVIE_BACKEND === "runpod") {
+      return await movieServerless(request, parts, await getVoiceOwnerId());
+    }
     const token = process.env.MOVIE_WORKER_TOKEN;
     if (!token) throw new Error("Movie worker token is not configured.");
     const headers = new Headers({

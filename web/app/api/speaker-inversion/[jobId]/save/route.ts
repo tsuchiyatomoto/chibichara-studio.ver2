@@ -4,7 +4,8 @@ import {
   getErrorMessage,
   getIrodoriErrorDetail,
 } from "../../../_lib/irodori";
-import { getScopedIrodoriHeaders } from "../../../_lib/voice-owner";
+import { getScopedIrodoriHeaders, getVoiceOwnerId } from "../../../_lib/voice-owner";
+import { voiceServerlessEnabled, serviceResponse, saveTrainedVoice } from "../../../_lib/service-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +33,8 @@ export async function POST(request: Request, context: RouteContext) {
   if (!name || name.length > 80) {
     return apiError("保存名は1〜80文字で指定してください。", 400);
   }
+
+  if (voiceServerlessEnabled()) return serviceResponse(async () => saveTrainedVoice(await getVoiceOwnerId(), jobId, name));
 
   try {
     const body = new FormData();

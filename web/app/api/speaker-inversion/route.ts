@@ -4,12 +4,15 @@ import {
   getErrorMessage,
   getIrodoriErrorDetail,
 } from "../_lib/irodori";
-import { getScopedIrodoriHeaders } from "../_lib/voice-owner";
+import { getScopedIrodoriHeaders, getVoiceOwnerId } from "../_lib/voice-owner";
+import { voiceServerlessEnabled, serviceResponse, submitTraining, readServiceForm } from "../_lib/service-serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (voiceServerlessEnabled()) return serviceResponse(async () =>
+    submitTraining(await getVoiceOwnerId(), request, await readServiceForm(request, 101 * 1024 ** 2)));
   try {
     const input = await request.formData();
     const voiceId = String(input.get("voice_id") ?? "").trim();
