@@ -52,6 +52,9 @@ next-env.d.ts
 /.movie-data/
 /.speech-jobs/
 speech-jobs/
+# The Next.js polling API is source code, not runtime job data.
+!web/app/api/speech-jobs/
+!web/app/api/speech-jobs/**
 /.movie-venv/
 .venv/
 /.toonout-data/

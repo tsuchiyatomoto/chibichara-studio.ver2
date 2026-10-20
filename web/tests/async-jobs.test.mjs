@@ -15,7 +15,30 @@ registerHooks({
 
 const { POST } = await import("../app/api/generate-speech/route.ts");
 const { proxyWorkerJob } = await import("../app/api/_lib/proxy-worker-job.ts");
+const { GET: getSpeechJob, DELETE: deleteSpeechJob } = await import("../app/api/speech-jobs/[...path]/route.ts");
 const jobId = "job_" + "b".repeat(32);
+
+test("the deployed speech job route exposes polling, content and cancellation", async t => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    calls.push({ path: new URL(url).pathname, method: init.method });
+    return String(url).endsWith("/content")
+      ? new Response("RIFF-test", { headers: { "Content-Type": "audio/wav" } })
+      : Response.json({ id: jobId, status: init.method === "DELETE" ? "cancelled" : "completed" });
+  });
+  const context = parts => ({ params: Promise.resolve({ path: parts }) });
+  assert.equal((await getSpeechJob(new Request("http://local"), context([jobId]))).status, 200);
+  const content = await getSpeechJob(new Request("http://local"), context([jobId, "content"]));
+  assert.equal(content.headers.get("content-type"), "audio/wav");
+  assert.equal(await content.text(), "RIFF-test");
+  const cancelled = await deleteSpeechJob(new Request("http://local", { method: "DELETE" }), context([jobId]));
+  assert.equal((await cancelled.json()).status, "cancelled");
+  assert.deepEqual(calls, [
+    { path: "/v1/audio/speech-jobs/" + jobId, method: "GET" },
+    { path: "/v1/audio/speech-jobs/" + jobId + "/content", method: "GET" },
+    { path: "/v1/audio/speech-jobs/" + jobId, method: "DELETE" },
+  ]);
+});
 
 test("speech generation returns 202 immediately and forwards an owner and retry key", async (t) => {
   t.mock.method(globalThis, "fetch", async (url, init) => {
