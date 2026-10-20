@@ -71,4 +71,6 @@ privateイメージは ghcr.io/tsuchiyatomoto/chibichara-gpu:v0.3.0-services-ser
 
 本番ビルドをローカル起動し、ChromiumからVoice・ToonOutの結果取得、マイボイス一覧、学習の保存状態、Movieの完了状態を確認した。別のブラウザーからの結果取得は404。小さい音声・画像はNext.jsから直接返すため、ブラウザーのfetchにR2のCORS設定は不要。完成ファイルの取得にはRunpod APIキーも不要。
 
-2026-10-20のRunpodカタログで24GBプールは1ワーカー毎時0.69米ドル相当。最小0・最大1・待機60秒を設定した。21:35 JSTの再確認では3役ともコンテナ停止ログとRUNNING 0を確認した。公式仕様のIDLEは停止済み・非課金で、以前の「待機ワーカーが残っているため停止未確認」という解釈を訂正した。直近の利用費用の台帳照合は集計反映待ち。[自動停止の確認結果](runpod-autostop-verification.md)を参照。Renderへの公開はまだ行っていない。
+2026-10-20のRunpodカタログで24GBプールは1ワーカー毎時0.69米ドル相当。最小0・最大1・待機60秒を設定した。21:35 JSTの再確認では3役ともコンテナ停止ログとRUNNING 0を確認した。公式仕様のIDLEは停止済み・非課金で、以前の「待機ワーカーが残っているため停止未確認」という解釈を訂正した。直近の利用費用の台帳照合は集計反映待ち。[自動停止の確認結果](runpod-autostop-verification.md)を参照。
+
+同日、Next.jsをRenderのFreeプラン・Singapore・Root Directory `web`で公開した。公開URLから音声生成、OpenAI画像生成とToonOutの背景除去、R2へのアップロード、ブラウザーでの結果取得を確認した。[Renderの設定と確認範囲](render-deployment.md)を参照。
