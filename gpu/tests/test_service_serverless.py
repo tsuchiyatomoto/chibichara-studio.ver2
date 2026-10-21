@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from service_serverless import Cancelled, run_service_job
+from service_serverless import Cancelled, LocalService, run_service_job
 from test_movie_serverless import Storage
 
 
@@ -120,6 +120,52 @@ def test_upstream_failure_is_sanitized_and_cleans_local_files(case):
     assert execute(case, Failing)["status"] == "failed"
     assert b"secret-token" not in storage.files[prefix + "result.json"]
     assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("asset_kind", [None, "reference_audio", "speaker_embedding"])
+@pytest.mark.parametrize("caption, expected_options", [
+    (None, {}),
+    ("", {}),
+    (" \t\n", {}),
+    ("A calm voice", {"caption": "A calm voice"}),
+])
+def test_speech_request_omits_blank_caption_and_preserves_voice_reference(tmp_path, asset_kind, caption, expected_options):
+    import httpx
+
+    local_id, asset_id = "job_" + "c" * 32, "vasset_" + "d" * 32
+    wave = b"RIFF\x00\x00\x00\x00WAVEdata"
+    submitted = []
+    uploads = []
+
+    def request(request):
+        if request.url.path in {"/v1/audio/voice-assets/references", "/v1/audio/speaker-assets"}:
+            uploads.append(request.url.path)
+            return httpx.Response(201, json={"id": asset_id})
+        if request.url.path == "/v1/audio/speech-jobs":
+            body = json.loads(request.content)
+            submitted.append(body)
+            # Match the API's documented input constraint, before any inference.
+            if "caption" in body["irodori"] and not body["irodori"]["caption"].strip():
+                return httpx.Response(400, json={"error": "caption must be non-empty when specified."})
+            return httpx.Response(202, json={"id": local_id, "status": "completed"})
+        assert request.url.path == "/v1/audio/speech-jobs/" + local_id + "/content"
+        return httpx.Response(200, content=wave)
+
+    payload = {"input": "A follow-up sample.", "speed": 1, "asset_kind": asset_kind}
+    if caption is not None:
+        payload["caption"] = caption
+    manifest = {"owner": "anon_" + "e" * 32, "kind": "speech", "id": "job_" + "f" * 32, "payload": payload}
+    path = tmp_path / "reference"
+    path.write_bytes(wave)
+    with httpx.Client(base_url="http://local", transport=httpx.MockTransport(request)) as client:
+        service = LocalService.__new__(LocalService)
+        service.http, service.check = client, lambda: None
+        result = service.run(manifest, [({}, path)] if asset_kind else [])
+    assert result[:3] == (wave, "result.wav", "audio/wav")
+    assert len(submitted) == 1
+    assert submitted[0]["irodori"] == expected_options
+    assert submitted[0].get("voice_asset_id") == (asset_id if asset_kind else None)
+    assert uploads == ([] if not asset_kind else ["/v1/audio/speaker-assets" if asset_kind == "speaker_embedding" else "/v1/audio/voice-assets/references"])
 
 
 @pytest.mark.parametrize("change", ["owner", "key", "digest", "expired", "role"])

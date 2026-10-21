@@ -74,3 +74,13 @@ privateイメージは ghcr.io/tsuchiyatomoto/chibichara-gpu:v0.3.0-services-ser
 2026-10-20のRunpodカタログで24GBプールは1ワーカー毎時0.69米ドル相当。最小0・最大1・待機60秒を設定した。21:35 JSTの再確認では3役ともコンテナ停止ログとRUNNING 0を確認した。公式仕様のIDLEは停止済み・非課金で、以前の「待機ワーカーが残っているため停止未確認」という解釈を訂正した。直近の利用費用の台帳照合は集計反映待ち。[自動停止の確認結果](runpod-autostop-verification.md)を参照。
 
 同日、Next.jsをRenderのFreeプラン・Singapore・Root Directory `web`で公開した。公開URLから音声生成、OpenAI画像生成とToonOutの背景除去、R2へのアップロード、ブラウザーでの結果取得を確認した。[Renderの設定と確認範囲](render-deployment.md)を参照。
+
+## 2026-10-21のVoice修正
+
+学習サンプルの2本目以降は、1本目のWAVを基準音声として使い、声の説明文を省略する。Serverlessハンドラーが説明文を空の`caption`として音声APIへ送っていたため、`caption must be non-empty when specified.`で拒否されていた。空文字・空白のみ・未指定の場合は`caption`を送らず、説明文がある場合はそのまま渡すよう修正した。
+
+基準WAV・保存済み埋め込み・参照なしの各条件でリクエストを検証する回帰テストを追加し、関連テスト33件が成功した。修正イメージ内の実際のハンドラーと音声APIを使ったオフライン検証も4件成功した。
+
+Voiceのテンプレート`euogwwu4si`とエンドポイント`7iz75uwsux8sbm`を、privateイメージ`ghcr.io/tsuchiyatomoto/chibichara-gpu:v0.3.1-voice-caption-20261021@sha256:66f46fc96a93295c8f49dba497a3736d08bff268bdf2b230b1b6c6bbcd57e97c`へ更新し、読み戻しで確認した。
+
+公開URLから1本目を生成して基準WAVをR2に保存し、それを使って説明文なしの2本目を生成した。両方ともRunpodとアプリで完了し、ブラウザーからのダウンロードも成功した。音声は48kHzで1本目3.56秒、2本目3.12秒。有限の波形・無音でないことを確認し、今回専用のR2テストデータだけを削除した。既存のブラウザーでは生成ボタンを再度押して不足分から再開できる。

@@ -113,7 +113,12 @@ class LocalService:
             if not isinstance(text, str) or not 1 <= len(text) <= 4096 or len(files) > 1:
                 raise ValueError("Invalid speech request")
             body = {"model": "irodori-tts", "input": text, "voice": "none", "response_format": "wav",
-                    "speed": payload.get("speed", 1), "irodori": {"caption": payload.get("caption", "")}}
+                    "speed": payload.get("speed", 1), "irodori": {}}
+            # Follow-up samples use a waveform reference instead of a description.
+            # The local API accepts an omitted caption, but rejects a blank one.
+            caption = payload.get("caption")
+            if isinstance(caption, str) and caption.strip():
+                body["irodori"]["caption"] = caption
             if files:
                 item, path = files[0]
                 speaker = payload.get("asset_kind") == "speaker_embedding"
