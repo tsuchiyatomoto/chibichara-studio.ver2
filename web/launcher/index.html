@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light">
+  <title>読み込み中… | chibichara studio</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100svh; display: grid; place-items: center; padding: 24px; background: #f6f7fb; color: #083344; font-family: system-ui, sans-serif; }
+    main { width: 100%; max-width: 440px; padding: 40px 28px; border: 2px solid #22d3ee; border-radius: 24px; background: #fffdf5; text-align: center; }
+    .brand { margin: 0 0 32px; font-size: 14px; font-weight: 800; }
+    .spinner { display: block; width: 36px; height: 36px; margin: 0 auto 20px; border: 3px solid #cffafe; border-top-color: #0891b2; border-radius: 50%; animation: spin 1s linear infinite; }
+    h1 { margin: 0 0 16px; font-size: 24px; }
+    p { line-height: 1.8; }
+    #description { margin: 0; color: #47616e; }
+    button { margin-top: 24px; padding: 12px 24px; border: 0; border-radius: 12px; background: #0891b2; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #0891b2; outline-offset: 4px; }
+    [hidden] { display: none !important; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">chibichara studio</p>
+    <span id="spinner" class="spinner" aria-hidden="true"></span>
+    <h1 id="status" role="status">読み込み中…</h1>
+    <p id="description">アプリの準備をしています。<br>初回は約1分かかることがあります。<br>このままお待ちください。</p>
+    <button id="retry" type="button" hidden>もう一度試す</button>
+    <noscript><p>JavaScriptを有効にするか、<a href="https://chibichara-studio-prototype.onrender.com/avatar">アプリを開いてください</a>。</p></noscript>
+  </main>
+  <script type="module" src="./start.js"></script>
+</body>
+</html>

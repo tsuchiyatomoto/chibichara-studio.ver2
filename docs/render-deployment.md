@@ -69,6 +69,14 @@ Movieの動画変換と保存済みボイスの連携は、先にローカルNex
 
 RenderのFree Web Serviceは15分間リクエストがないと休止し、次のアクセス時の起動に約1分かかる。GPU側も停止後の初回処理に起動待ちがある。
 
+テストユーザーには、`web/launcher`を配信するRender Static Siteの入口URLを案内する。入口はCDNから配信するため、アプリの休止中も「読み込み中…」を表示できる。認証情報を送らずに`/api/ready`を確認し、準備ができたら現在のアプリの`/avatar`へ移動する。`?next=/voice`または`?next=/movie`でも移動先を指定できる。
+
+入口の接続確認は開いている間だけ行い、2分で自動確認を止めて「もう一度試す」を表示する。常時監視や、休止を防ぐための定期通信は追加していない。`/api/ready`はNext.jsの応答だけを確認し、GPUジョブの作成やR2への接続は行わない。
+
+Static Siteの設定は、同じGitHubリポジトリの`main`、Build Command `true`、Publish Directory `web/launcher`、環境変数`SKIP_INSTALL_DEPS=true`を使う。シークレットの登録は不要。現在のアプリURLを直接開いた場合、起動前の画面はRenderが返すため、独自の入口表示は出せない。
+
+アプリ内のメニューでは、ページ移動中に「読み込み中…」を表示する。ルートの読み込みにも`app/loading.tsx`を使う。
+
 - [RenderのFreeプラン仕様](https://render.com/docs/free)
 - [Renderのモノレポ設定](https://render.com/docs/monorepo-support)
 - [Runpod側の構成](voice-toonout-serverless.md)

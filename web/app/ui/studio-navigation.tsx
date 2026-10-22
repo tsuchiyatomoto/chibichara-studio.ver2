@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link, { useLinkStatus } from "next/link";
 import { usePathname } from "next/navigation";
 
 type NavigationIconName = "avatar" | "voice" | "movie";
@@ -74,6 +74,21 @@ function isActivePath(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function NavigationLoading() {
+  const { pending } = useLinkStatus();
+  if (!pending) return null;
+
+  return (
+    <span
+      role="status"
+      className="fixed top-4 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full border-2 border-[#0891b2] bg-white px-5 py-3 text-sm font-bold text-[#083344] shadow-lg"
+    >
+      <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-[#0891b2]/25 border-t-[#0891b2] motion-reduce:animate-none" />
+      読み込み中…
+    </span>
+  );
+}
+
 export default function StudioNavigation() {
   const pathname = usePathname();
 
@@ -106,6 +121,7 @@ export default function StudioNavigation() {
               >
                 <NavigationIcon name={item.icon} />
                 <span>{item.label}</span>
+                <NavigationLoading />
               </Link>
             );
           })}
@@ -140,6 +156,7 @@ export default function StudioNavigation() {
                 <NavigationIcon name={item.icon} />
               </span>
               <span>{item.label}</span>
+              <NavigationLoading />
             </Link>
           );
         })}
