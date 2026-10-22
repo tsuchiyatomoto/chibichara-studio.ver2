@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aC0kAAAAASUVORK5CYII=";
 
 export async function saveMovieVoice(page: Page, voiceAssetId = `vasset_${"a".repeat(32)}`) {
-  await page.goto("/");
+  await page.goto("/avatar");
   await page.evaluate(async (voiceAssetId) => {
     await new Promise<void>((resolve, reject) => {
       const open = indexedDB.open("chibichara-voice", 1);
@@ -24,7 +24,7 @@ export async function saveMovieVoice(page: Page, voiceAssetId = `vasset_${"a".re
 }
 
 export async function saveMovieAvatar(page: Page, frames: string[] | null = Array(4).fill(PNG)) {
-  await page.goto("/");
+  await page.goto("/avatar");
   await page.evaluate(async ({ frames, image }) => {
     await new Promise<void>((resolve, reject) => {
       const open = indexedDB.open("chibichara-avatar", 1);

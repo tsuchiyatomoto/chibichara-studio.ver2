@@ -34,6 +34,8 @@
 .player svg { width: 20px; height: 20px; flex-shrink: 0; }
 .video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #080c11; color-scheme: dark; }
 .surface { position: absolute; inset: 0; display: flex; flex-direction: column; background: #fffdf5f7; }
+.content { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.content[hidden] { display: none; }
 .player:not(:has(video)) .surface { background: #fffdf5; }
 .surface.completed { background: transparent; pointer-events: none; }
 .surface.reviewing { background: transparent; pointer-events: none; }
@@ -52,6 +54,7 @@
 .tools { display: flex; gap: 8px; flex-shrink: 0; }
 .iconButton { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid #0891b24d; border-radius: 8px; background: #fff; color: #083344; }
 .iconButton:hover:not(:disabled) { border-color: #0891b2; background: #e6faff; }
+.iconButton[inert] { opacity: .6; }
 .activeIconButton { border-color: #0891b2; background: #cff6ff; box-shadow: inset 0 0 0 1px #0891b2; }
 .avatarLayer { position: absolute; z-index: 2; inset: 0; overflow: hidden; pointer-events: none; }
 .avatarImage { position: absolute; display: block; max-width: none; height: auto; user-select: none; pointer-events: none; transform-origin: center; filter: drop-shadow(0 4px 10px #0000003d); }
@@ -114,7 +117,7 @@
 .dropOverlay { position: absolute; z-index: 3; inset: 8px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 24px; border: 2px dashed #0891b2; border-radius: 8px; background: #e6fafff7; color: #083344; pointer-events: none; font-size: 16px; font-weight: 700; text-align: center; padding: 24px; }
 .dropOverlay svg { width: 42px; height: 42px; color: #0891b2; }
 .dragging { border-color: #0891b2; }
-.overlay { position: absolute; z-index: 2; inset: 0; display: flex; flex-direction: column; background: #fffdf5; }
+.overlay { position: relative; z-index: 2; display: flex; flex: 1; min-height: 0; flex-direction: column; background: #fffdf5; pointer-events: auto; }
 .overlayHeader { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid #0000001a; background: #f3ecdc; }
 .overlayHeader h2 { font-size: 20px; font-weight: 700; letter-spacing: -.025em; }
 .overlayBody { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px; scrollbar-width: thin; }

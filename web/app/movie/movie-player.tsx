@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import AudioDiagnostics from "./audio-diagnostics";
 import MovieAvatarOverlay from "./movie-avatar-overlay";
 import { ACTIVE, STATES, fileUrl, stamp, type AvatarPlacement, type Health, type Job, type MovieAvatarPose } from "./movie-types";
@@ -52,15 +52,13 @@ function Icon({ name }: { name: "upload" | "history" | "settings" | "close" | "d
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function Overlay({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Overlay({ id, title, onClose, children }: { id: string; title: string; onClose: () => void; children: ReactNode }) {
   const close = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     close.current?.focus();
   }, []);
   return (
-    <div className={styles.overlay} role="dialog" aria-label={title} onKeyDown={(event) => {
-      if (event.key === "Escape") { event.stopPropagation(); onClose(); }
-    }}>
+    <div id={id} className={styles.overlay} role="dialog" aria-label={title}>
       <div className={styles.overlayHeader}>
         <h2>{title}</h2>
         <button ref={close} className={styles.iconButton} onClick={onClose} aria-label="閉じる"><Icon name="close" /></button>
@@ -78,6 +76,7 @@ export default function MoviePlayer({
   const player = useRef<HTMLElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const [panel, setPanel] = useState<"history" | "details" | null>(null);
+  const panelId = useId();
   const [avatarEditing, setAvatarEditing] = useState(false);
   const panelTrigger = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -110,6 +109,11 @@ export default function MoviePlayer({
     : "Voiceで保存した声を使用";
   const message = error || job?.error;
   const chooseFile = () => { if (canUpload && !panel) input.current?.click(); };
+  function togglePanel(next: "history" | "details", trigger: HTMLButtonElement) {
+    panelTrigger.current = trigger;
+    setAvatarEditing(false);
+    setPanel((current) => current === next ? null : next);
+  }
 
   return (
     <main className={styles.page}>
@@ -117,6 +121,9 @@ export default function MoviePlayer({
         ref={player}
         className={`${styles.player} ${dragging ? styles.dragging : ""}`}
         aria-label="Movie 動画ボックス"
+        onKeyDown={(event) => {
+          if (panel && event.key === "Escape") { event.stopPropagation(); setPanel(null); }
+        }}
         onPlayCapture={(event) => {
           event.currentTarget.querySelectorAll<HTMLMediaElement>("audio, video").forEach((el) => {
             if (el !== event.target) el.pause();
@@ -169,7 +176,6 @@ export default function MoviePlayer({
         )}
         <div
           className={`${styles.surface} ${completed ? styles.completed : ""} ${reviewing ? styles.reviewing : ""}`}
-          inert={!!panel}
         >
           <header className={styles.header}>
             <div className={styles.identity}>
@@ -182,6 +188,8 @@ export default function MoviePlayer({
                   className={styles.iconButton}
                   href={fileUrl(job, "output.mp4")}
                   download="converted.mp4"
+                  inert={!!panel}
+                  aria-disabled={!!panel}
                   aria-label="MP4をダウンロード"
                   title="MP4をダウンロード"
                 ><Icon name="download" /></a>
@@ -190,7 +198,7 @@ export default function MoviePlayer({
                 <button
                   className={`${styles.iconButton} ${avatarEditing ? styles.activeIconButton : ""}`}
                   onClick={() => setAvatarEditing((value) => !value)}
-                  disabled={locked}
+                  disabled={locked || !!panel}
                   aria-label="アバターの配置を調整"
                   aria-pressed={avatarEditing}
                   title="アバターの配置を調整"
@@ -199,7 +207,7 @@ export default function MoviePlayer({
               {reviewing && (
                 <button
                   className={`${styles.primary} ${styles.headerAction}`}
-                  disabled={locked || !health?.voice_available || !avatarPoses.length || !health.gemini_configured}
+                  disabled={locked || !!panel || !health?.voice_available || !avatarPoses.length || !health.gemini_configured}
                   onClick={() => { setAvatarEditing(false); onAnalyze(); }}
                   title={!health?.voice_available
                     ? "Voiceで声を保存してください"
@@ -212,11 +220,12 @@ export default function MoviePlayer({
                   変換を開始
                 </button>
               )}
-              {job && <button className={styles.iconButton} onClick={chooseFile} disabled={!canUpload} aria-label="別のMP4を選択" title="別のMP4を選択"><Icon name="upload" /></button>}
-              <button className={styles.iconButton} onClick={(event) => { panelTrigger.current = event.currentTarget; setPanel("history"); }} disabled={busy || uploading} aria-label="最近の動画" title="最近の動画"><Icon name="history" /></button>
-              <button className={styles.iconButton} onClick={(event) => { panelTrigger.current = event.currentTarget; setPanel("details"); }} disabled={busy || uploading} aria-label="設定・詳細" title="設定・詳細"><Icon name="settings" /></button>
+              {job && <button className={styles.iconButton} onClick={chooseFile} disabled={!canUpload || !!panel} aria-label="別のMP4を選択" title="別のMP4を選択"><Icon name="upload" /></button>}
+              <button className={`${styles.iconButton} ${panel === "history" ? styles.activeIconButton : ""}`} onClick={(event) => togglePanel("history", event.currentTarget)} disabled={busy || uploading} aria-label="最近の動画" title="最近の動画" aria-expanded={panel === "history"} aria-controls={panelId} aria-haspopup="dialog"><Icon name="history" /></button>
+              <button className={`${styles.iconButton} ${panel === "details" ? styles.activeIconButton : ""}`} onClick={(event) => togglePanel("details", event.currentTarget)} disabled={busy || uploading} aria-label="設定・詳細" title="設定・詳細" aria-expanded={panel === "details"} aria-controls={panelId} aria-haspopup="dialog"><Icon name="settings" /></button>
             </div>
           </header>
+          <div className={styles.content} hidden={!!panel} inert={!!panel}>
           <input ref={input} type="file" accept="video/mp4,.mp4" className={styles.fileInput} aria-label="MP4ファイル" disabled={!canUpload} onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
@@ -294,9 +303,8 @@ export default function MoviePlayer({
               <span className={reviewing ? styles.footerDuration : undefined}>{job?.media ? stamp(job.media.duration) : "60分まで · 実況者1人"}</span>
             </>}
           </footer>
-        </div>
-        {dragging && canUpload && <div className={styles.dropOverlay}><Icon name="upload" /><p>ここにドロップしてアップロード</p></div>}
-        {panel && <Overlay title={panel === "history" ? "最近の動画" : "設定・詳細"} onClose={() => setPanel(null)}>
+          </div>
+        {panel && <Overlay key={panel} id={panelId} title={panel === "history" ? "最近の動画" : "設定・詳細"} onClose={() => setPanel(null)}>
           {message && <p role="alert" className={styles.error}>{message}</p>}
           {panel === "history" ? <>
             {!jobs.length && <p className={styles.hint}>{hasUploadAssets
@@ -329,6 +337,8 @@ export default function MoviePlayer({
             <p className={styles.hint}>MP4・最大{Math.round((health?.max_bytes ?? 20 * 1024 ** 3) / 1024 ** 3)} GiB・60分まで。ゲーム音と実況音を別々の音声トラックに収録してください。</p>
           </div>}
         </Overlay>}
+        </div>
+        {dragging && canUpload && <div className={styles.dropOverlay}><Icon name="upload" /><p>ここにドロップしてアップロード</p></div>}
       </section>
     </main>
   );
