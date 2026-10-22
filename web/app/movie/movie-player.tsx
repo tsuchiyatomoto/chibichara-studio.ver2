@@ -248,8 +248,8 @@ export default function MoviePlayer({
                         ? "Voiceでボイスモデルを生成・保存すると、Movieを開始できます。"
                         : "Avatarでポーズ付きアバターを生成・保存すると、Movieを開始できます。"}</p>
                     <div className={styles.preparationLinks}>
+                      {missingAvatar && <Link className={styles.primary} href="/avatar">アバターを作成</Link>}
                       {missingVoice && <Link className={styles.primary} href="/voice">ボイスモデルを作成</Link>}
-                      {missingAvatar && <Link className={missingVoice ? styles.secondary : styles.primary} href="/avatar">アバターを作成</Link>}
                     </div>
                   </>
                 ) : (
