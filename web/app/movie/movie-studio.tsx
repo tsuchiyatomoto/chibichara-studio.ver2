@@ -34,6 +34,7 @@ export default function MovieStudio() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
+  const [pollError, setPollError] = useState<{ jobId: string; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -91,6 +92,7 @@ export default function MovieStudio() {
     setJob(selected);
     setLocalMedia(null);
     setError("");
+    setPollError(null);
     setGlossary("");
     setGameGain(selected.game_gain);
     setVoiceGain(selected.voice_gain);
@@ -159,21 +161,31 @@ export default function MovieStudio() {
   }, [job, gameGain, voiceGain, refreshList]);
   useEffect(() => {
     if (!jobId || !running) return;
+    const polledJobId = jobId;
     let live = true;
-    const timer = setInterval(() => {
-      api<Job>(`jobs/${jobId}`)
-        .then((updated) => {
-          if (!live) return;
-          setJob(updated);
-          if (!ACTIVE.has(updated.state)) void refreshList().catch(() => {});
-        })
-        .catch((e) => {
-          if (live) setError(e.message);
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const updated = await api<Job>(`jobs/${polledJobId}`, { signal: AbortSignal.timeout(30000) });
+        if (!live) return;
+        setJob(updated);
+        setPollError(null);
+        if (!ACTIVE.has(updated.state)) {
+          void refreshList().catch(() => {});
+          return;
+        }
+      } catch (e) {
+        if (live) setPollError({
+          jobId: polledJobId,
+          message: `${e instanceof Error ? e.message : "進捗を取得できませんでした。"} 進捗を再確認しています。再変換せずにお待ちください。`,
         });
-    }, 2500);
+      }
+      if (live) timer = setTimeout(poll, 2500);
+    }
+    timer = setTimeout(poll, 2500);
     return () => {
       live = false;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [jobId, running, refreshList]);
   async function action(fn: () => Promise<Job>) {
@@ -359,7 +371,7 @@ export default function MovieStudio() {
       job={job}
       jobs={jobs}
       health={health ? { ...health, voice_available: voiceAvailable } : null}
-      error={error}
+      error={error || (pollError && pollError.jobId === jobId ? pollError.message : "")}
       busy={busy || loading || !avatarReady || !voiceReady}
       uploading={uploading}
       assetsReady={avatarReady && voiceReady}

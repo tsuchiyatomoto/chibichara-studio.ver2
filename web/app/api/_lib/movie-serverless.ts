@@ -27,7 +27,10 @@ async function runpod(path: string, body?: unknown) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", signal: AbortSignal.timeout(20000),
   });
-  if (!response.ok) throw new MovieHttpError(503, "動画処理サービスに接続できませんでした。");
+  if (!response.ok) {
+    console.warn("[movie/runpod] Request failed", { operation: path.split("/")[0], status: response.status });
+    throw new MovieHttpError(503, "動画処理サービスに接続できませんでした。");
+  }
   return response.json();
 }
 
