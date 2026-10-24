@@ -258,7 +258,13 @@ export default function MoviePlayer({
                     <h1>{job?.state === "expired" ? "動画の保存期限が終了しました" : "動画をここにドロップ"}</h1>
                     <p>あなたのキャラクターの声で、実況をつくる。</p>
                     <button className={styles.primary} disabled={!canUpload} onClick={chooseFile}>MP4を選択</button>
-                    <small>ゲーム音と実況音が別トラックのMP4</small>
+                    <div className={styles.uploadInstructions}>
+                      <strong>OBSで録画したゲーム音声と実況音声が別トラックのMP4動画をアップロードしてください。</strong>
+                      <ul>
+                        <li>トラック1：ゲーム音声</li>
+                        <li>トラック2：実況音声</li>
+                      </ul>
+                    </div>
                   </>
                 )}
               </div>

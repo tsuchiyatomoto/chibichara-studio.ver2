@@ -75,6 +75,8 @@
 .empty p, .center p, .workflow > p { color: #686052; font-size: 14px; line-height: 1.8; }
 .empty p { margin-top: -10px; }
 .empty small, .center small { color: #777067; font-size: 12px; line-height: 1.6; }
+.uploadInstructions { display: grid; gap: 8px; color: #777067; font-size: 12px; line-height: 1.6; }
+.uploadInstructions ul { width: fit-content; margin-inline: auto; padding-left: 1.5em; list-style: disc; text-align: left; }
 .uploadIcon { display: grid; width: 72px; height: 72px; margin-bottom: 4px; place-items: center; border: 1px solid #d8b146; border-radius: 12px; background: #fff7d6; color: #9b6b16; }
 .uploadIcon svg { width: 30px; height: 30px; }
 .primary, .secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; padding: 12px 24px; border: 1px solid; border-radius: 8px; font-size: 14px; font-weight: 700; line-height: 1.5; text-decoration: none; }
