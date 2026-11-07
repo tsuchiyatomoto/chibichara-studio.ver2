@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { Job } from "../app/movie/movie-types";
+import { saveMovieAvatar, saveMovieVoice } from "./movie-fixtures";
 
 const responses = [
   {
@@ -117,4 +118,52 @@ test("Movie keeps an action error when status polling succeeds", async ({ page }
   const before = polls;
   await expect.poll(() => polls, { timeout: 10_000 }).toBeGreaterThan(before);
   await expect(alert).toHaveText(failure);
+});
+
+test("Movie stops polling an unknown job and checks again only on request", async ({ page }) => {
+  let job: Job = { ...pollingJob };
+  let checks = 0;
+  let submissions = 0;
+  await page.addInitScript((id) => localStorage.setItem("movie-current", id), job.id);
+  await page.route("**/api/movie/**", async route => {
+    const path = new URL(route.request().url()).pathname.replace("/api/movie/", "");
+    if (path === "health") return route.fulfill({ json: pollingHealth });
+    if (path === "jobs") return route.fulfill({ json: { jobs: [job] } });
+    if (path.endsWith("/analyze")) { submissions++; return route.fulfill({ status: 409 }); }
+    if (path === `jobs/${job.id}`) {
+      checks++;
+      job = checks === 1
+        ? { ...job, state: "status_unknown", message: "重複を避けるため、動画は再送しないでください。" }
+        : { ...job, state: "completed", progress: 100 };
+      return route.fulfill({ json: job });
+    }
+    return route.fulfill({ status: 404 });
+  });
+  await saveMovieAvatar(page);
+  await saveMovieVoice(page);
+  await page.goto("/movie");
+  await expect(page.getByRole("heading", { name: "動画の処理状況を確認できません" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(page.getByLabel("MP4ファイル")).toBeDisabled();
+  // Observe a full former polling interval to catch an accidentally scheduled retry.
+  await page.waitForTimeout(3000);
+  expect(checks).toBe(1);
+  expect(submissions).toBe(0);
+  await page.getByRole("button", { name: "状況を再確認", exact: true }).click();
+  await expect(page.getByRole("link", { name: "MP4をダウンロード" })).toBeVisible();
+  expect(checks).toBe(2);
+  expect(submissions).toBe(0);
+});
+
+test("Movie restores an unknown job and prevents deleting its inputs", async ({ page }) => {
+  const job: Job = { ...pollingJob, state: "status_unknown", message: "時間をおいて状況を再確認してください。" };
+  await page.addInitScript((id) => localStorage.setItem("movie-current", id), job.id);
+  await page.route("**/api/movie/**", route => {
+    const path = new URL(route.request().url()).pathname.replace("/api/movie/", "");
+    return route.fulfill({ json: path === "health" ? pollingHealth : path === "jobs" ? { jobs: [job] } : job });
+  });
+  await page.goto("/movie");
+  await expect(page.getByRole("button", { name: "状況を再確認", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "最近の動画", exact: true }).click();
+  await expect(page.getByRole("button", { name: `${job.name}を削除`, exact: true })).toBeDisabled();
 });

@@ -75,6 +75,46 @@ def download(client, bucket, key, target, limit):
 
 
 def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, scratch=None):
+    context = {"stage": "manifest", "runId": payload.get("id")}
+    key = payload.get("input", {}).get("manifest_key", "")
+    match = MANIFEST.fullmatch(key)
+    if match:
+        context["jobId"] = match[2]
+    try:
+        return _run_movie(payload, context=context, client=client, engine_factory=engine_factory,
+                          prepare_voice=prepare_voice, scratch=scratch)
+    except Exception as error:
+        # Provider exception messages can contain credentials, URLs or user text.
+        failure = {"event": "movie_job_failure", "timestamp": time.time(),
+                   "jobId": context.get("jobId"), "runId": context.get("runId"),
+                   "stage": context["stage"], "errorType": type(error).__name__}
+        http_status = getattr(getattr(error, "response", None), "status_code", None)
+        if isinstance(http_status, int):
+            failure["httpStatus"] = http_status
+        print(json.dumps(failure), file=sys.stderr)
+        if context.get("manifest") is not None:
+            original = context["manifest"]["job"]
+            message = "動画処理でエラーが発生しました。動画を再アップロードしてください。"
+            job = {name: original[name] for name in
+                   ("id", "name", "size", "received", "avatar", "game_gain", "voice_gain") if name in original}
+            job.update(state="failed", message=message, error=message, updated=time.time(),
+                       progress=0, segments=[], confirmed=False)
+            record = {"job": job, "runId": context.get("runId"), "terminal": False,
+                      "stage": context["stage"], "code": "worker_failed", "errorType": type(error).__name__}
+            if isinstance(http_status, int):
+                record["httpStatus"] = http_status
+            try:
+                # Never overwrite a completed result or a confirmed terminal failure.
+                context["client"].put_object(Bucket=context["bucket"], Key=context["prefix"] + "failure.json",
+                    Body=json.dumps(record).encode(), ContentType="application/json", IfNoneMatch="*")
+            except Exception as save_error:
+                if getattr(save_error, "response", {}).get("Error", {}).get("Code") not in {"PreconditionFailed", "412"}:
+                    print(json.dumps({**failure, "event": "movie_failure_save_failed",
+                                      "errorType": type(save_error).__name__}), file=sys.stderr)
+        raise
+
+
+def _run_movie(payload, *, context, client=None, engine_factory=None, prepare_voice=None, scratch=None):
     key = payload.get("input", {}).get("manifest_key", "")
     match = MANIFEST.fullmatch(key)
     if not match:
@@ -89,6 +129,7 @@ def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, 
         raise ValueError("Invalid movie owner or job.")
     if manifest["expires"] <= time.time():
         raise ValueError("Movie inputs have expired.")
+    context.update(manifest=manifest, client=client, bucket=bucket, prefix=prefix, stage="validate_input")
     if payload.get("id"):
         client.put_object(Bucket=bucket, Key=prefix + "receipt.json",
                           Body=json.dumps({"runId": payload["id"]}).encode(), ContentType="application/json")
@@ -109,6 +150,7 @@ def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, 
         ident = local["id"]
         directory = store.directory(ident)
         received = 0
+        context["stage"] = "download_input"
         with (directory / "input.mp4").open("wb") as output:
             for chunk_key in manifest["chunks"]:
                 chunk_match = re.fullmatch(re.escape(prefix) + r"chunks/(\d+)-([a-f0-9]{64})", chunk_key)
@@ -141,6 +183,7 @@ def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, 
         voice_hash = hashlib.sha256(voice.read_bytes()).hexdigest()
         if voice_hash != voice_key[len(prefix) + 6:-len(".safetensors")]:
             raise ValueError("Speaker checksum mismatch.")
+        context["stage"] = "prepare_voice"
         if prepare_voice is None:
             from safetensors.numpy import load_file
             import numpy as np
@@ -174,7 +217,9 @@ def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, 
         # and the output upload finish; do not start Engine's background loop.
         try:
             check(ident)
+            context["stage"] = "inspect"
             engine.perform(ident, "inspect")
+            context["stage"] = "analyze"
             engine.perform(ident, "analyze")
             next_cancel_check = 0
             check(ident)
@@ -186,11 +231,13 @@ def run_movie(payload, *, client=None, engine_factory=None, prepare_voice=None, 
         completed = store.get(ident)
         if completed["state"] != "completed":
             raise RuntimeError("Movie conversion did not complete.")
+        context["stage"] = "upload_output"
         for name, content_type in (("output.mp4", "video/mp4"), ("commentary.wav", "audio/wav")):
             client.upload_file(str(directory / name), bucket, prefix + name, ExtraArgs={"ContentType": content_type})
         result = store.public(completed)
         result.update(id=public_id, updated=time.time())
         # Publish the result only after both downloads are safely available.
+        context["stage"] = "publish_result"
         client.put_object(Bucket=bucket, Key=prefix + "result.json", Body=json.dumps(result).encode(), ContentType="application/json")
         return {"id": public_id, "state": "completed"}
 

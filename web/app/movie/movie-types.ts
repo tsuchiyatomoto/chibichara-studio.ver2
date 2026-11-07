@@ -92,6 +92,7 @@ export const STATES: Record<string, string> = {
   failed: "処理を停止",
   cancelled: "中止済み",
   cancelling: "中止しています",
+  status_unknown: "状況を確認できません",
 };
 export const EMOTIONS: Record<string, string> = {
   neutral: "通常",

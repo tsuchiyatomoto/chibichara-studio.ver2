@@ -31,6 +31,10 @@ class Storage:
         return {"Body": Body(data), "ContentLength": len(data)}
 
     def put_object(self, *, Bucket, Key, Body, **kwargs):
+        if kwargs.get("IfNoneMatch") == "*" and Key in self.files:
+            error = RuntimeError("Conditional write conflict")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
         self.files[Key] = Body
 
     def upload_file(self, path, bucket, key, **kwargs):
@@ -110,15 +114,28 @@ def test_downloaded_speaker_is_accepted_by_real_synthesis_precondition(case):
     assert result["state"] == "completed"
 
 
-def test_processing_failure_cleans_sqlite_and_does_not_publish_result(case):
+def test_processing_failure_saves_safe_failure_metadata_and_cleans_sqlite(case, capsys):
     class Failing(Engine):
         def perform(self, *_):
-            raise RuntimeError("failed")
+            raise RuntimeError("private-token-and-provider-user-text")
     with pytest.raises(RuntimeError):
         execute(case, Failing)
     storage, _, prefix, scratch = case
     assert list(scratch.iterdir()) == []
     assert prefix + "result.json" not in storage.files
+    failure = json.loads(storage.files[prefix + "failure.json"])
+    assert failure["job"]["state"] == "failed"
+    assert failure["job"]["id"] == "b" * 32
+    assert failure["runId"] == "run-test"
+    assert failure["stage"] == "inspect"
+    assert failure["errorType"] == "RuntimeError"
+    assert failure["terminal"] is False
+    assert "private-token" not in json.dumps(failure)
+    log = capsys.readouterr().err
+    assert "private-token" not in log
+    record = json.loads(log)
+    assert record["event"] == "movie_job_failure"
+    assert record["jobId"] == "b" * 32 and record["runId"] == "run-test"
 
 
 def test_output_upload_failure_never_marks_completed(case):
@@ -129,6 +146,7 @@ def test_output_upload_failure_never_marks_completed(case):
     with pytest.raises(OSError):
         execute(case)
     assert prefix + "result.json" not in storage.files
+    assert json.loads(storage.files[prefix + "failure.json"])["stage"] == "upload_output"
     assert list(scratch.iterdir()) == []
 
 
@@ -144,7 +162,7 @@ def test_cancelled_job_cleans_scratch_and_never_uploads_video(case):
 
 @pytest.mark.parametrize("change", ["owner", "expiry", "chunk", "avatar", "voice", "checksum"])
 def test_rejects_foreign_expired_or_unsafe_inputs(case, change):
-    storage, payload, _, _ = case
+    storage, payload, prefix, _ = case
     key = payload["input"]["manifest_key"]
     manifest = json.loads(storage.files[key])
     if change == "owner": manifest["owner"] = "another-owner"
@@ -156,3 +174,71 @@ def test_rejects_foreign_expired_or_unsafe_inputs(case, change):
     storage.files[key] = json.dumps(manifest).encode()
     with pytest.raises(ValueError):
         execute(case)
+    if change in {"owner", "expiry"}:
+        assert prefix + "failure.json" not in storage.files
+
+
+def test_failure_recording_does_not_overwrite_completed_result_or_confirmed_failure(case):
+    storage, _, prefix, scratch = case
+    original_result = json.dumps({"id": "b" * 32, "state": "completed"}).encode()
+    original_failure = json.dumps({"terminal": True, "stage": "prior_attempt"}).encode()
+    storage.files[prefix + "result.json"] = original_result
+    storage.files[prefix + "failure.json"] = original_failure
+
+    class Failing(Engine):
+        def perform(self, *_):
+            raise RuntimeError("failed")
+
+    with pytest.raises(RuntimeError):
+        execute(case, Failing)
+    assert storage.files[prefix + "result.json"] == original_result
+    assert storage.files[prefix + "failure.json"] == original_failure
+    assert list(scratch.iterdir()) == []
+
+
+def test_failure_recording_outage_preserves_original_error_and_cleans_scratch(case):
+    storage, _, prefix, scratch = case
+    put = storage.put_object
+
+    def fail_save(**kwargs):
+        if kwargs["Key"] == prefix + "failure.json":
+            raise OSError("storage is offline")
+        return put(**kwargs)
+
+    storage.put_object = fail_save
+
+    class Failing(Engine):
+        def perform(self, *_):
+            raise ValueError("original failure")
+
+    with pytest.raises(ValueError, match="original failure"):
+        execute(case, Failing)
+    assert list(scratch.iterdir()) == []
+
+
+def test_success_after_an_attempt_failure_still_publishes_completed_result(case):
+    storage, _, prefix, _ = case
+    storage.files[prefix + "failure.json"] = json.dumps({"terminal": False, "code": "worker_failed"}).encode()
+    assert execute(case)["state"] == "completed"
+    assert json.loads(storage.files[prefix + "result.json"])["state"] == "completed"
+
+
+def test_provider_http_status_is_retained_without_exception_text(case, capsys):
+    from types import SimpleNamespace
+
+    class HTTPFailure(RuntimeError):
+        response = SimpleNamespace(status_code=403)
+
+    class Failing(Engine):
+        def perform(self, *_):
+            raise HTTPFailure("secret-provider-response")
+
+    with pytest.raises(HTTPFailure):
+        execute(case, Failing)
+    storage, _, prefix, _ = case
+    failure = json.loads(storage.files[prefix + "failure.json"])
+    assert failure["httpStatus"] == 403
+    log = capsys.readouterr().err
+    assert json.loads(log)["httpStatus"] == 403
+    assert "secret-provider-response" not in log
+    assert "secret-provider-response" not in json.dumps(failure)

@@ -38,11 +38,12 @@ function fixture(t) {
     }
   });
   let submits = 0;
+  let runtime = () => Response.json({ status: "IN_PROGRESS" });
   t.mock.method(globalThis, "fetch", async (url, init) => {
     if (String(url).endsWith("/speaker-assets")) return Response.json({ data: [{ id: "vasset_" + "c".repeat(32), created_at: 1 }] });
     if (String(url).endsWith("/content")) return new Response("voice");
     if (String(url).endsWith("/run")) { submits++; assert.equal(JSON.parse(init.body).input.manifest_key.endsWith("/manifest.json"), true); return Response.json({ id: "run-1" }); }
-    if (String(url).includes("/status/")) return Response.json({ status: "IN_PROGRESS" });
+    if (String(url).includes("/status/")) return runtime(url, init);
     throw new Error("unexpected fetch: " + url);
   });
   async function request(path, method = "GET", data, oid = owner) {
@@ -65,7 +66,12 @@ function fixture(t) {
     assert.equal((await request(`jobs/${job.id}/avatar`, "POST", { placement: { x: 0, y: 0, scale: 1, rotation: 0, flip_x: false }, poses: [{ id: "pose", label: "pose", frames }] })).status, 200);
     return job;
   }
-  return { files, request, upload, ready, submits: () => submits };
+  async function submitted() {
+    const job = await ready();
+    assert.equal((await request(`jobs/${job.id}/analyze`, "POST", { glossary: "" })).status, 202);
+    return { job, prefix: `movie-temp/${owner}/${job.id}/` };
+  }
+  return { files, request, upload, ready, submitted, setRuntime: handler => { runtime = handler; }, submits: () => submits };
 }
 
 test("chunk retries are idempotent; owners cannot read or delete each other's jobs", async t => {
@@ -137,4 +143,176 @@ test("oversized upload and premature completion are rejected", async t => {
   const job = await (await f.request("uploads", "POST", { name: "test.mp4", size: 5 })).json();
   assert.equal((await f.request(`uploads/${job.id}/complete`, "POST", {})).status, 409);
   assert.equal((await f.request(`uploads/${job.id}?offset=0`, "PUT", Buffer.alloc(6))).status, 400);
+});
+
+test("a missing Runpod job stops after three checks and can be checked again without resubmitting", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  let checks = 0;
+  const logs = [];
+  t.mock.method(console, "warn", line => logs.push(JSON.parse(line)));
+  f.setRuntime(() => { checks++; return Response.json({ error: "private-provider-detail" }, { status: 404 }); });
+  const response = await f.request(`jobs/${job.id}`);
+  const unknown = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(unknown.state, "status_unknown");
+  assert.match(unknown.message, /状況を再確認/);
+  assert.equal(checks, 3);
+  assert.equal(f.files.has(prefix + "failure.json"), false);
+  assert.equal(f.files.has(prefix + "result.json"), false);
+  assert.ok(logs.some(log => log.jobId === job.id && log.runId === "run-1" && log.httpStatus === 404 && log.stage === "status"));
+  assert.equal(JSON.stringify(logs).includes("private-provider-detail"), false);
+  assert.equal(JSON.stringify(logs).includes("local-runpod-test"), false);
+  f.setRuntime(() => Response.json({ status: "IN_PROGRESS" }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "analyzing");
+  assert.equal(f.submits(), 1);
+});
+
+test("one transient 404 recovers on the next status check", async t => {
+  const f = fixture(t);
+  const { job } = await f.submitted();
+  let checks = 0;
+  f.setRuntime(() => ++checks === 1 ? new Response(null, { status: 404 }) : Response.json({ status: "IN_PROGRESS" }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "analyzing");
+  assert.equal(checks, 2);
+});
+
+test("completion published during a 404 response wins immediately", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  let checks = 0;
+  f.setRuntime(() => {
+    checks++;
+    f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...job, state: "completed" })), etag: "completed" });
+    return new Response(null, { status: 404 });
+  });
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "completed");
+  assert.equal(checks, 1);
+  assert.equal(f.files.has(prefix + "failure.json"), false);
+});
+
+for (const remote of ["FAILED", "TIMED_OUT", "CANCELLED"]) {
+  test(`${remote} is retained after Runpod history disappears; a later completed result takes priority`, async t => {
+    const f = fixture(t);
+    const { job, prefix } = await f.submitted();
+    f.setRuntime(() => Response.json({ status: remote }));
+    const expected = remote === "CANCELLED" ? "cancelled" : "failed";
+    assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, expected);
+    const record = JSON.parse(f.files.get(prefix + "failure.json").body);
+    assert.equal(record.terminal, true);
+    assert.equal(record.code, remote);
+    assert.equal(f.files.has(prefix + "result.json"), false);
+    f.setRuntime(() => { throw new Error("Runpod history has gone"); });
+    assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, expected);
+    f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...job, state: "completed" })), etag: "completed" });
+    assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "completed");
+    assert.equal((await f.request(`jobs/${job.id}/files/output.mp4`)).status, 302);
+  });
+}
+
+test("completion during failure persistence cannot be overwritten", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  const send = S3Client.prototype.send;
+  t.mock.method(S3Client.prototype, "send", async function(command) {
+    if (command.constructor.name === "PutObjectCommand" && command.input.Key === prefix + "failure.json") {
+      f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...job, state: "completed" })), etag: "completed" });
+    }
+    return send.call(this, command);
+  });
+  f.setRuntime(() => Response.json({ status: "FAILED" }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "completed");
+  assert.equal(JSON.parse(f.files.get(prefix + "result.json").body).state, "completed");
+});
+
+test("a worker failure does not stop a provider retry and survives a later missing history", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  f.files.set(prefix + "failure.json", { etag: "attempt", body: Buffer.from(JSON.stringify({
+    job: { ...job, state: "failed" }, runId: "run-1", terminal: false, stage: "analyze", code: "worker_failed", errorType: "HTTPStatusError", httpStatus: 403,
+  })) });
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "analyzing");
+  const logs = [];
+  t.mock.method(console, "warn", line => logs.push(JSON.parse(line)));
+  f.setRuntime(() => new Response(null, { status: 404 }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "failed");
+  const record = JSON.parse(f.files.get(prefix + "failure.json").body);
+  assert.equal(record.stage, "analyze");
+  assert.equal(record.errorType, "HTTPStatusError");
+  assert.equal(record.httpStatus, 403);
+  assert.ok(logs.some(log => log.code === "worker_failed" && log.errorType === "HTTPStatusError" && log.httpStatus === 403 && log.stage === "analyze"));
+  assert.equal(record.terminal, true);
+});
+
+for (const status of [404, 503]) {
+  test(`one job's upstream ${status} does not prevent listing another completed video`, async t => {
+    const f = fixture(t);
+    const { job: missing } = await f.submitted();
+    const { job: completed, prefix } = await f.submitted();
+    f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...completed, state: "completed" })), etag: "completed" });
+    f.setRuntime(() => new Response(null, { status }));
+    const response = await f.request("jobs");
+    assert.equal(response.status, 200);
+    const { jobs } = await response.json();
+    assert.equal(jobs.length, 2);
+    assert.equal(jobs.find(job => job.id === missing.id).state, "status_unknown");
+    assert.equal(jobs.find(job => job.id === completed.id).state, "completed");
+  });
+}
+
+test("unknown jobs cannot be deleted or resubmitted; cancellation still reaches storage", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  f.setRuntime(() => new Response(null, { status: 404 }));
+  assert.equal((await f.request(`jobs/${job.id}`, "DELETE")).status, 409);
+  assert.ok(f.files.has(prefix + "manifest.json"));
+  assert.equal((await f.request(`jobs/${job.id}/analyze`, "POST", { glossary: "" })).status, 409);
+  assert.equal((await f.request(`jobs/${job.id}/cancel`, "POST", {})).status, 200);
+  assert.ok(f.files.has(prefix + "cancel.json"));
+  assert.equal(f.submits(), 1);
+});
+
+test("a completed status without saved output is unknown and recovers after output publication", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  f.setRuntime(() => Response.json({ status: "COMPLETED" }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "status_unknown");
+  assert.equal(f.files.has(prefix + "failure.json"), false);
+  f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...job, state: "completed" })), etag: "completed" });
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "completed");
+});
+
+test("a stale attempt from another Runpod job is not treated as this job's failure", async t => {
+  const f = fixture(t);
+  const { job, prefix } = await f.submitted();
+  f.files.set(prefix + "failure.json", { etag: "stale", body: Buffer.from(JSON.stringify({
+    job: { ...job, state: "failed" }, runId: "different-run", terminal: true, stage: "analyze", code: "worker_failed",
+  })) });
+  f.setRuntime(() => new Response(null, { status: 404 }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "status_unknown");
+});
+
+test("unknown provider statuses do not leave a video analyzing forever", async t => {
+  const f = fixture(t);
+  const { job } = await f.submitted();
+  f.setRuntime(() => Response.json({ status: "UNKNOWN" }));
+  assert.equal((await (await f.request(`jobs/${job.id}`)).json()).state, "status_unknown");
+});
+
+test("a manifest removed after object listing does not hide the other videos", async t => {
+  const f = fixture(t);
+  const { prefix: removed } = await f.submitted();
+  const { job: completed, prefix } = await f.submitted();
+  f.files.set(prefix + "result.json", { body: Buffer.from(JSON.stringify({ ...completed, state: "completed" })), etag: "completed" });
+  const send = S3Client.prototype.send;
+  t.mock.method(S3Client.prototype, "send", async function(command) {
+    if (command.constructor.name === "GetObjectCommand" && command.input.Key === removed + "manifest.json") f.files.delete(command.input.Key);
+    return send.call(this, command);
+  });
+  const response = await f.request("jobs");
+  assert.equal(response.status, 200);
+  const { jobs } = await response.json();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].id, completed.id);
+  assert.equal(jobs[0].state, "completed");
 });

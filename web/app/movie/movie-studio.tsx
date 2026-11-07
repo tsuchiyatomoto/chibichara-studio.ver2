@@ -255,7 +255,7 @@ export default function MovieStudio() {
     });
   }
   async function upload(file?: File) {
-    if (!file || uploading || busy || running) return;
+    if (!file || uploading || busy || running || job?.state === "status_unknown") return;
     if (!avatarReady || !voiceReady || !health) return;
     if (!voiceAvailable || !savedAvatarPoses.length) {
       setError("Voiceでボイスモデルを、Avatarでアバターを生成・保存してから動画を選択してください。");

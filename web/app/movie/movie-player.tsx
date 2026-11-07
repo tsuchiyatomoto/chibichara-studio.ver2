@@ -85,7 +85,8 @@ export default function MoviePlayer({
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const running = !!job && ACTIVE.has(job.state);
-  const locked = busy || uploading || running;
+  const statusUnknown = job?.state === "status_unknown";
+  const locked = busy || uploading || running || statusUnknown;
   const checkingAssets = !health || !assetsReady;
   const missingVoice = !health?.voice_available;
   const missingAvatar = !hasSavedAvatar;
@@ -96,7 +97,7 @@ export default function MoviePlayer({
   const reviewing = job?.state === "ready" && (!!job.media || serverless);
   const playable = completed || reviewing;
   const stopped = job && ["failed", "cancelled"].includes(job.state);
-  const transitioning = job?.analyzed && !running && !stopped && !completed;
+  const transitioning = job?.analyzed && !running && !stopped && !completed && !statusUnknown;
   const mutedCount = job?.segments.filter((s) => s.mode !== "tts").length ?? 0;
   const uploadPercent = job?.size ? Math.min(100, job.received / job.size * 100) : 0;
   const progress = job?.state === "uploading" ? uploadPercent : Math.min(100, Math.max(0, job?.progress ?? 0));
@@ -283,6 +284,14 @@ export default function MoviePlayer({
                 {running && <small>画面を閉じても処理は続きます</small>}
               </div>
             )}
+            {statusUnknown && job && (
+              <div className={styles.center} aria-live="polite">
+                <h2>動画の処理状況を確認できません</h2>
+                <p>{job.message}</p>
+                <button className={styles.primary} disabled={busy} onClick={() => void onSelectJob(job.id)}>状況を再確認</button>
+                <button className={styles.secondary} disabled={busy} onClick={onCancel}>処理を中止</button>
+              </div>
+            )}
             {transitioning && (
               <div className={styles.center} aria-live="polite">
                 <span className={styles.kicker}>PROCESSING</span>
@@ -321,7 +330,7 @@ export default function MoviePlayer({
                 <button disabled={busy || uploading} onClick={async () => { await onSelectJob(item.id); setPanel(null); }} aria-current={item.id === job?.id ? "true" : undefined}>
                   <span>{item.name}</span><small>{STATES[item.state] ?? item.state}</small>
                 </button>
-                <button className={styles.deleteButton} disabled={ACTIVE.has(item.state) || busy || uploading} onClick={() => void onDeleteJob(item.id)} aria-label={`${item.name}を削除`}>削除</button>
+                <button className={styles.deleteButton} disabled={ACTIVE.has(item.state) || item.state === "status_unknown" || busy || uploading} onClick={() => void onDeleteJob(item.id)} aria-label={`${item.name}を削除`}>削除</button>
               </div>)}
             </div>
             <p className={styles.hint}>動画は最終操作から24時間保存されます。処理中は削除されません。</p>

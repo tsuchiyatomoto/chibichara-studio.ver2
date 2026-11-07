@@ -1,5 +1,6 @@
 import "server-only";
 import { randomUUID, createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Job, MovieAvatar } from "../../movie/movie-types";
 import { fetchIrodori } from "./irodori";
 import { getScopedIrodoriHeaders } from "./voice-owner";
@@ -7,10 +8,51 @@ import { voiceServerlessEnabled, listVoiceAssets, latestVoiceBytes } from "./ser
 import { CHUNK_BYTES, MOVIE_PREFIX, MOVIE_TTL, MovieHttpError, readJson, putFile, listKeys, deletePrefix, downloadUrl, limitedBody } from "./movie-storage";
 
 type Manifest = { job: Job; owner: string; expires: number; chunks: string[]; runId?: string; submitted?: boolean; glossary?: string; voiceKey?: string };
+type Failure = { job: Job; runId?: string; terminal: boolean; stage: string; code: string; errorType?: string; httpStatus?: number };
 const now = () => Date.now() / 1000;
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "private, no-store" } });
 const maxBytes = () => Number(process.env.MOVIE_MAX_BYTES || 20 * 1024 ** 3);
 const active = new Set(["queued", "validating", "analyzing", "synthesizing", "mixing", "cancelling"]);
+const statusUnknownMessage = "動画の処理状況を確認できません。時間をおいて「状況を再確認」を押してください。重複を避けるため、動画は再送しないでください。";
+
+function diagnostic(code: string, context: { jobId?: string; runId?: string; stage: string; httpStatus?: number; errorType?: string }) {
+  console.warn(JSON.stringify({ event: "movie_service_error", timestamp: new Date().toISOString(), code, ...context }));
+}
+
+class RunpodError extends MovieHttpError {
+  upstreamStatus?: number;
+  constructor(upstreamStatus?: number) {
+    super(503, "動画処理サービスに接続できませんでした。");
+    this.upstreamStatus = upstreamStatus;
+  }
+}
+
+async function optionalJson<T>(key: string) {
+  try { return await readJson<T>(key); }
+  catch (error) { if (error instanceof MovieHttpError && error.status === 404) return undefined; throw error; }
+}
+
+function unknownStatus(manifest: Manifest): Job {
+  return { ...manifest.job, state: "status_unknown", error: undefined, message: statusUnknownMessage };
+}
+
+async function rememberFailure(manifest: Manifest, prefix: string, state: "failed" | "cancelled", code: string) {
+  // Separate objects ensure a late failure can never overwrite a completed video.
+  const existing = await optionalJson<Failure>(prefix + "failure.json");
+  const attempt = existing && existing.value.runId === manifest.runId ? existing.value : undefined;
+  const message = state === "cancelled" ? "中止しました。" : code === "TIMED_OUT"
+    ? "動画処理が制限時間を超えました。動画を短くして再アップロードしてください。"
+    : "動画処理に失敗しました。動画を再アップロードしてください。";
+  const job: Job = { ...manifest.job, state, message, error: state === "failed" ? message : undefined, updated: now() };
+  const record: Failure = { ...attempt, job, runId: manifest.runId, terminal: true, stage: attempt?.stage ?? "runpod_status", code };
+  diagnostic(code, { jobId: job.id, runId: manifest.runId, stage: record.stage, errorType: record.errorType, httpStatus: record.httpStatus });
+  try {
+    await putFile(prefix + "failure.json", JSON.stringify(record), "application/json", existing ? { IfMatch: existing.etag } : { IfNoneMatch: "*" });
+  } catch {
+    diagnostic("failure_save_failed", { jobId: job.id, runId: manifest.runId, stage: "save_failure" });
+  }
+  return (await optionalJson<Job>(prefix + "result.json"))?.value ?? job;
+}
 
 async function inputObject(request: Request, limit: number) {
   const value = JSON.parse((await limitedBody(request, limit)).toString());
@@ -18,35 +60,77 @@ async function inputObject(request: Request, limit: number) {
   return value;
 }
 
-async function runpod(path: string, body?: unknown) {
+async function runpod(path: string, body?: unknown, jobId?: string) {
   const endpoint = process.env.RUNPOD_MOVIE_ENDPOINT_ID;
   const token = process.env.RUNPOD_API_KEY;
   if (!endpoint || !/^[a-zA-Z0-9_-]+$/.test(endpoint) || !token) throw new MovieHttpError(503, "動画処理の接続設定が不足しています。");
-  const response = await fetch(`https://api.runpod.ai/v2/${endpoint}/${path}`, {
+  const [operation, runId] = path.split("/");
+  let response: Response;
+  try { response = await fetch(`https://api.runpod.ai/v2/${endpoint}/${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", signal: AbortSignal.timeout(20000),
-  });
-  if (!response.ok) {
-    console.warn("[movie/runpod] Request failed", { operation: path.split("/")[0], status: response.status });
-    throw new MovieHttpError(503, "動画処理サービスに接続できませんでした。");
+  }); } catch {
+    diagnostic("runpod_network_error", { jobId, runId, stage: operation });
+    throw new RunpodError();
   }
-  return response.json();
+  if (!response.ok) {
+    diagnostic("runpod_http_error", { jobId, runId, stage: operation, httpStatus: response.status });
+    await response.body?.cancel();
+    throw new RunpodError(response.status);
+  }
+  try {
+    const value = await response.json();
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid response");
+    return value;
+  } catch {
+    diagnostic("runpod_invalid_response", { jobId, runId, stage: operation, httpStatus: response.status });
+    throw new RunpodError(response.status);
+  }
 }
 
 async function status(manifest: Manifest, prefix: string): Promise<Job> {
   // The result survives worker shutdown and Runpod's result retention window.
-  try { return (await readJson<Job>(prefix + "result.json")).value; }
-  catch (error) { if (!(error instanceof MovieHttpError) || error.status !== 404) throw error; }
+  const saved = await optionalJson<Job>(prefix + "result.json");
+  if (saved) return saved.value;
   if (!manifest.runId && manifest.submitted) {
     try { manifest.runId = (await readJson<{ runId: string }>(prefix + "receipt.json")).value.runId; }
     catch (error) { if (!(error instanceof MovieHttpError) || error.status !== 404) throw error; }
   }
+  const failure = await optionalJson<Failure>(prefix + "failure.json");
+  if (failure?.value.terminal && failure.value.runId === manifest.runId) {
+    return (await optionalJson<Job>(prefix + "result.json"))?.value ?? failure.value.job;
+  }
   if (!manifest.runId) return manifest.job;
-  const result = await runpod(`status/${encodeURIComponent(manifest.runId)}`);
-  if (result.status === "FAILED" || result.status === "TIMED_OUT") return { ...manifest.job, state: "failed", message: "動画処理に失敗しました。動画を再アップロードしてください。" };
-  if (result.status === "CANCELLED") return { ...manifest.job, state: "cancelled", message: "中止しました。" };
-  if (result.status === "COMPLETED") throw new MovieHttpError(503, "完成動画の保存を確認できません。時間をおいて再取得してください。");
+  let result;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { result = await runpod(`status/${encodeURIComponent(manifest.runId)}`, undefined, manifest.job.id); }
+    catch (error) {
+      if (!(error instanceof RunpodError) || error.upstreamStatus !== 404) throw error;
+      // A worker may publish its result while the provider's status disappears.
+      const completed = await optionalJson<Job>(prefix + "result.json");
+      if (completed) return completed.value;
+      if (attempt < 2) { await delay(300); continue; }
+      const recorded = await optionalJson<Failure>(prefix + "failure.json");
+      if (recorded?.value.runId === manifest.runId) return rememberFailure(manifest, prefix, "failed", "worker_failed");
+      diagnostic("status_unavailable", { jobId: manifest.job.id, runId: manifest.runId, stage: "status", httpStatus: 404 });
+      return unknownStatus(manifest);
+    }
+    const completed = await optionalJson<Job>(prefix + "result.json");
+    if (completed) return completed.value;
+    if (result.status !== "COMPLETED") break;
+    if (attempt < 2) await delay(300);
+  }
+  if (result.status === "FAILED" || result.status === "TIMED_OUT") return rememberFailure(manifest, prefix, "failed", result.status);
+  if (result.status === "CANCELLED") return rememberFailure(manifest, prefix, "cancelled", result.status);
+  if (result.status === "COMPLETED") {
+    diagnostic("completed_result_missing", { jobId: manifest.job.id, runId: manifest.runId, stage: "load_result" });
+    return unknownStatus(manifest);
+  }
+  if (result.status !== "IN_QUEUE" && result.status !== "IN_PROGRESS") {
+    diagnostic("runpod_invalid_status", { jobId: manifest.job.id, runId: manifest.runId, stage: "status" });
+    return unknownStatus(manifest);
+  }
   try {
     await readJson(prefix + "cancel.json");
     return { ...manifest.job, state: "cancelling", message: "実行中の工程が終了したら中止します。" };
@@ -74,6 +158,7 @@ export async function movieServerless(request: Request, parts: string[], owner: 
   catch (error) {
     if (error instanceof MovieHttpError) return json({ error: error.message }, error.status);
     if (error instanceof SyntaxError) return json({ error: "送信データが不正です。" }, 400);
+    diagnostic("movie_request_failed", { jobId: /^[a-f0-9]{32}$/.test(parts[1] ?? "") ? parts[1] : undefined, stage: "request" });
     return json({ error: "動画の一時保存先または処理サービスに接続できません。設定を確認してください。" }, 503);
   }
 }
@@ -94,8 +179,16 @@ async function dispatch(request: Request, parts: string[], owner: string): Promi
     const keys = (await listKeys(scope)).filter(k => k.endsWith("/manifest.json"));
     const jobs: Job[] = [];
     for (const key of keys) {
-      const { value } = await readJson<Manifest>(key);
-      if (value.expires > now()) jobs.push(await status(value, key.slice(0, -"manifest.json".length)));
+      const entry = await optionalJson<Manifest>(key);
+      if (!entry) continue; // Lifecycle deletion may race with the object listing.
+      const { value } = entry;
+      if (value.expires > now()) {
+        try { jobs.push(await status(value, key.slice(0, -"manifest.json".length))); }
+        catch {
+          diagnostic("job_status_failed", { jobId: value.job.id, runId: value.runId, stage: "list_jobs" });
+          jobs.push(unknownStatus(value));
+        }
+      }
     }
     return json({ jobs: jobs.sort((a, b) => b.updated - a.updated) });
   }
@@ -127,16 +220,17 @@ async function dispatch(request: Request, parts: string[], owner: string): Promi
   }
   if (kind === "jobs" && action === "cancel" && method === "POST") {
     const current = await status(manifest, prefix);
-    if (!active.has(current.state)) return json(current);
+    if (!active.has(current.state) && current.state !== "status_unknown") return json(current);
     if (!manifest.runId) throw new MovieHttpError(409, "受付確認中です。時間をおいて再取得してください。");
     await putFile(prefix + "cancel.json", "{}", "application/json");
     // Running work stops through Engine.check, after in-flight TTS completes.
     // Cancelling a queued Runpod job also avoids an unnecessary cold start.
-    if (current.state === "queued") await runpod(`cancel/${encodeURIComponent(manifest.runId)}`, {});
+    if (current.state === "queued") await runpod(`cancel/${encodeURIComponent(manifest.runId)}`, {}, id);
     return json({ ...job, state: "cancelling", message: "中止しています。" });
   }
   if (kind === "jobs" && !action && method === "DELETE") {
-    if (active.has((await status(manifest, prefix)).state)) throw new MovieHttpError(409, "処理を中止してから削除してください。");
+    const current = await status(manifest, prefix);
+    if (active.has(current.state) || current.state === "status_unknown") throw new MovieHttpError(409, "処理の終了を確認してから削除してください。");
     await deletePrefix(prefix);
     return json({ deleted: true });
   }
@@ -197,9 +291,10 @@ async function dispatch(request: Request, parts: string[], owner: string): Promi
     await save(); // Conditional claim prevents double-clicks from running two GPU jobs.
     const claimed = await readJson<Manifest>(key);
     try {
-      const submitted = await runpod("run", { input: { manifest_key: key }, policy: { executionTimeout: 7200000, ttl: 21600000 } });
+      const submitted = await runpod("run", { input: { manifest_key: key }, policy: { executionTimeout: 7200000, ttl: 21600000 } }, id);
       if (typeof submitted.id !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(submitted.id)) throw new Error("Invalid job receipt.");
       manifest.runId = submitted.id;
+      console.info(JSON.stringify({ event: "movie_job_submitted", timestamp: new Date().toISOString(), jobId: id, runId: submitted.id, stage: "submit" }));
       await putFile(key, JSON.stringify(manifest), "application/json", { IfMatch: claimed.etag });
     } catch {
       // Submission timeouts are ambiguous: never blindly submit again.
